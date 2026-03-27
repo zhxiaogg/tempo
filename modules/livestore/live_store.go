@@ -34,6 +34,9 @@ import (
 const (
 	liveStoreServiceName = "live-store"
 
+	// highLagThreshold is the consume lag above which a warning is logged.
+	highLagThreshold = 10 * time.Second
+
 	// ringAutoForgetUnhealthyPeriods is how many consecutive timeout periods an unhealthy instance
 	// in the ring will be automatically removed.
 	ringAutoForgetUnhealthyPeriods = 2
@@ -151,6 +154,7 @@ type LiveStore struct {
 	lagCancel           context.CancelFunc
 	readyErr            atomic.Pointer[error] // nil when ready to serve queries
 	lastRecordTimeNanos atomic.Int64          // stores timestamp of last consumed record as UnixNano, -1 means not set
+	highLag             atomic.Bool           // true when consume lag last exceeded highLagThreshold
 }
 
 func New(cfg Config, overridesService overrides.Interface, logger log.Logger, reg prometheus.Registerer, singlePartition bool) (*LiveStore, error) {
@@ -318,41 +322,45 @@ func (s *LiveStore) starting(ctx context.Context) error {
 		return fmt.Errorf("failed to start livestore lifecycler: %w", err)
 	}
 
-	s.client, err = ingest.NewReaderClient(
-		s.cfg.IngestConfig.Kafka,
-		ingest.NewReaderClientMetrics(liveStoreServiceName, s.reg),
-		s.logger,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create kafka reader client: %w", err)
+	if !s.cfg.skipKafka {
+		s.client, err = ingest.NewReaderClient(
+			s.cfg.IngestConfig.Kafka,
+			ingest.NewReaderClientMetrics(liveStoreServiceName, s.reg),
+			s.logger,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to create kafka reader client: %w", err)
+		}
+
+		err = ingest.WaitForKafkaBroker(ctx, s.client, s.logger)
+		if err != nil {
+			return fmt.Errorf("failed to start livestore: %w", err)
+		}
+
+		lookbackPeriod := 2 * s.cfg.CompleteBlockTimeout
+		s.reader, err = NewPartitionReaderForPusher(s.client, s.ingestPartitionID, s.cfg.IngestConfig.Kafka, s.cfg.CommitInterval, lookbackPeriod, forceFromLookback, s.consume, s.logger, s.reg)
+		if err != nil {
+			return fmt.Errorf("failed to create partition reader: %w", err)
+		}
+		err = services.StartAndAwaitRunning(ctx, s.reader)
+		if err != nil {
+			return fmt.Errorf("failed to start partition reader: %w", err)
+		}
 	}
 
-	err = ingest.WaitForKafkaBroker(ctx, s.client, s.logger)
-	if err != nil {
-		return fmt.Errorf("failed to start livestore: %w", err)
+	if !s.cfg.skipKafka {
+		lagCtx, cncl := context.WithCancel(s.ctx)
+		s.lagCancel = cncl
+		// Start exporting partition lag metrics
+		ingest.ExportPartitionLagMetrics(
+			lagCtx,
+			s.client,
+			s.logger,
+			s.cfg.IngestConfig,
+			func() []int32 { return []int32{s.ingestPartitionID} },
+			s.client.ForceMetadataRefresh,
+		)
 	}
-
-	lookbackPeriod := 2 * s.cfg.CompleteBlockTimeout
-	s.reader, err = NewPartitionReaderForPusher(s.client, s.ingestPartitionID, s.cfg.IngestConfig.Kafka, s.cfg.CommitInterval, lookbackPeriod, forceFromLookback, s.consume, s.logger, s.reg)
-	if err != nil {
-		return fmt.Errorf("failed to create partition reader: %w", err)
-	}
-	err = services.StartAndAwaitRunning(ctx, s.reader)
-	if err != nil {
-		return fmt.Errorf("failed to start partition reader: %w", err)
-	}
-
-	lagCtx, cncl := context.WithCancel(s.ctx)
-	s.lagCancel = cncl
-	// Start exporting partition lag metrics
-	ingest.ExportPartitionLagMetrics(
-		lagCtx,
-		s.client,
-		s.logger,
-		s.cfg.IngestConfig,
-		func() []int32 { return []int32{s.ingestPartitionID} },
-		s.client.ForceMetadataRefresh,
-	)
 
 	for i := range s.cfg.CompleteBlockConcurrency {
 		idx := i
@@ -393,18 +401,20 @@ func (s *LiveStore) stopping(error) error {
 	s.readyErr.Store(&ErrStopping)
 	metricReady.Set(0)
 
-	// Stop the kafka lag background worker.
-	s.lagCancel()
+	if !s.cfg.skipKafka {
+		// Stop the kafka lag background worker.
+		s.lagCancel()
 
-	// Stop consuming
-	err := services.StopAndAwaitTerminated(context.Background(), s.reader)
-	if err != nil {
-		level.Warn(s.logger).Log("msg", "failed to stop reader", "err", err)
-		return err
+		// Stop consuming
+		err := services.StopAndAwaitTerminated(context.Background(), s.reader)
+		if err != nil {
+			level.Warn(s.logger).Log("msg", "failed to stop reader", "err", err)
+			return err
+		}
+
+		// Reset lag metrics for our partition when stopping
+		ingest.ResetLagMetricsForRevokedPartitions(s.cfg.IngestConfig.Kafka.ConsumerGroup, []int32{s.ingestPartitionID})
 	}
-
-	// Reset lag metrics for our partition when stopping
-	ingest.ResetLagMetricsForRevokedPartitions(s.cfg.IngestConfig.Kafka.ConsumerGroup, []int32{s.ingestPartitionID})
 
 	// Flush all data to disk
 	s.cutAllInstancesToWal()
@@ -604,6 +614,17 @@ func (s *LiveStore) consume(ctx context.Context, rs recordIter, now time.Time) (
 
 	// Store the timestamp of the last consumed record for lag calculation
 	s.lastRecordTimeNanos.Store(lastRecord.Timestamp.UnixNano())
+
+	// Log transitions across the high-lag threshold.
+	lag := now.Sub(lastRecord.Timestamp)
+	wasHigh := s.highLag.Load()
+	if !wasHigh && lag > highLagThreshold {
+		s.highLag.Store(true)
+		level.Warn(s.logger).Log("msg", "consume lag exceeded threshold", "lag", lag, "threshold", highLagThreshold)
+	} else if wasHigh && lag <= highLagThreshold {
+		s.highLag.Store(false)
+		level.Info(s.logger).Log("msg", "consume lag recovered below threshold", "lag", lag, "threshold", highLagThreshold)
+	}
 
 	offset := kadm.NewOffsetFromRecord(lastRecord)
 	return &offset, nil

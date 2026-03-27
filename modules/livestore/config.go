@@ -69,6 +69,7 @@ type Config struct {
 
 	// testing config
 	holdAllBackgroundProcesses bool `yaml:"-"` // if this is set to true, the live store will never release its background processes
+	skipKafka                  bool `yaml:"-"` // skip Kafka client/reader init; for benchmarks that call consume() directly
 
 	initialBackoff time.Duration `yaml:"-"` // default initial backoff for complete operations
 	maxBackoff     time.Duration `yaml:"-"` // default max backoff for complete operations
