@@ -18,6 +18,28 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
+// makeRecord builds a single Kafka record with a fresh trace ID, span IDs,
+// and current timestamp on every call.
+func makeRecord(b *testing.B) *kgo.Record {
+	b.Helper()
+	id := test.ValidTraceID(nil)
+	tr := test.MakeTrace(5, id)
+	traceBytes, err := proto.Marshal(tr)
+	if err != nil {
+		b.Fatalf("marshal trace: %v", err)
+	}
+	req := &tempopb.PushBytesRequest{
+		Traces: []tempopb.PreallocBytes{{Slice: traceBytes}},
+		Ids:    [][]byte{id},
+	}
+	records, err := ingest.Encode(0, testTenantID, req, 1_000_000)
+	if err != nil {
+		b.Fatalf("encode record: %v", err)
+	}
+	records[0].Timestamp = time.Now()
+	return records[0]
+}
+
 // TestMain starts a pprof HTTP server so you can attach interactively:
 //
 //	go tool pprof http://localhost:6060/debug/pprof/mutex
@@ -26,38 +48,6 @@ func TestMain(m *testing.M) {
 		_ = http.ListenAndServe("localhost:6060", nil)
 	}()
 	os.Exit(m.Run())
-}
-
-const benchPoolSize = 1000
-
-// buildRecordPool pre-builds a pool of Kafka records to avoid allocation
-// noise inside the benchmark loop. Each record is a fully-encoded
-// PushBytesRequest with one trace of 5 ResourceSpans batches.
-func buildRecordPool(b *testing.B) []*kgo.Record {
-	b.Helper()
-	now := time.Now()
-	pool := make([]*kgo.Record, 0, benchPoolSize)
-	for range benchPoolSize {
-		id := test.ValidTraceID(nil)
-		tr := test.MakeTrace(5, id)
-		traceBytes, err := proto.Marshal(tr)
-		if err != nil {
-			b.Fatalf("marshal trace: %v", err)
-		}
-		req := &tempopb.PushBytesRequest{
-			Traces: []tempopb.PreallocBytes{{Slice: traceBytes}},
-			Ids:    [][]byte{id},
-		}
-		records, err := ingest.Encode(0, testTenantID, req, 1_000_000)
-		if err != nil {
-			b.Fatalf("encode record: %v", err)
-		}
-		for _, r := range records {
-			r.Timestamp = now
-			pool = append(pool, r)
-		}
-	}
-	return pool
 }
 
 // BenchmarkLiveStore measures throughput and lock contention under concurrent
@@ -84,8 +74,6 @@ func BenchmarkLiveStore(b *testing.B) {
 		_ = services.StopAndAwaitTerminated(context.Background(), ls)
 	})
 
-	pool := buildRecordPool(b)
-
 	// Start query workers before the timer so they're running concurrently
 	// with the push loop throughout the benchmark.
 	queryCtx, cancelQueries := context.WithCancel(context.Background())
@@ -94,8 +82,13 @@ func BenchmarkLiveStore(b *testing.B) {
 
 	b.ResetTimer()
 
-	for i := range b.N {
-		rec := pool[i%benchPoolSize]
+	for range b.N {
+		// Build a fresh record (unique trace ID, span IDs, timestamp) outside
+		// the timed region so allocation noise doesn't skew ns/op.
+		b.StopTimer()
+		rec := makeRecord(b)
+		b.StartTimer()
+
 		if _, err := ls.consume(b.Context(), createRecordIter([]*kgo.Record{rec}), rec.Timestamp); err != nil {
 			b.Fatalf("consume: %v", err)
 		}
