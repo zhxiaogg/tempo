@@ -695,6 +695,9 @@ func (i *instance) preserveSlowWALBlock(id uuid.UUID, completionDuration time.Du
 
 	srcDir := filepath.Join(walPath, srcName)
 	dstDir := filepath.Join(preservedDir, srcName)
+
+	level.Warn(i.logger).Log("msg", "starting WAL block preservation due to slow completion", "block", id.String(), "completionDuration", completionDuration, "src", srcDir, "dst", dstDir)
+
 	if err := copyDir(srcDir, dstDir); err != nil {
 		level.Error(i.logger).Log("msg", "failed to copy WAL block for preservation", "block", id.String(), "err", err)
 		// Clean up partial copy
@@ -702,7 +705,7 @@ func (i *instance) preserveSlowWALBlock(id uuid.UUID, completionDuration time.Du
 		return
 	}
 
-	level.Warn(i.logger).Log("msg", "preserved WAL block due to slow completion", "block", id.String(), "completionDuration", completionDuration, "preservedPath", dstDir)
+	level.Warn(i.logger).Log("msg", "WAL block preservation complete", "block", id.String(), "completionDuration", completionDuration, "preservedPath", dstDir)
 }
 
 func copyDir(src, dst string) error {

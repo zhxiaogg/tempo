@@ -3,6 +3,8 @@ package livestore
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -273,6 +275,92 @@ func TestInstanceWALBackpressure(t *testing.T) {
 	// One more WAL block should trigger backpressure.
 	createWALBlock()
 	require.True(t, inst.backpressure(t.Context()), "expected backpressure at %d WAL blocks", walBackpressureLimit+1)
+
+	require.NoError(t, services.StopAndAwaitTerminated(t.Context(), ls))
+}
+
+func TestCopyDir(t *testing.T) {
+	src := t.TempDir()
+	dst := filepath.Join(t.TempDir(), "copy")
+
+	// Create a nested structure: file at root, subdir with file
+	require.NoError(t, os.WriteFile(filepath.Join(src, "a.txt"), []byte("hello"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(src, "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "sub", "b.txt"), []byte("world"), 0o644))
+
+	require.NoError(t, copyDir(src, dst))
+
+	got, err := os.ReadFile(filepath.Join(dst, "a.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "hello", string(got))
+
+	got, err = os.ReadFile(filepath.Join(dst, "sub", "b.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "world", string(got))
+}
+
+func TestPreserveSlowWALBlock(t *testing.T) {
+	inst, ls := defaultInstance(t)
+
+	// Push a trace and cut to create a WAL block on disk
+	id := test.ValidTraceID(nil)
+	pushTrace(t.Context(), t, inst, test.MakeTrace(1, id), id)
+	require.NoError(t, inst.cutIdleTraces(t.Context(), true))
+	walID, err := inst.cutBlocks(t.Context(), true)
+	require.NoError(t, err)
+	require.NotEqual(t, walID, [16]byte{})
+
+	// Preserve the WAL block
+	inst.preserveSlowWALBlock(walID, 35*time.Second)
+
+	// Verify the preserved directory has the block
+	preservedDir := filepath.Join(inst.wal.GetFilepath(), preservedWALDir)
+	entries, err := os.ReadDir(preservedDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "expected exactly one preserved block")
+
+	// Verify the preserved directory contains files
+	preservedBlockDir := filepath.Join(preservedDir, entries[0].Name())
+	files, err := os.ReadDir(preservedBlockDir)
+	require.NoError(t, err)
+	require.NotEmpty(t, files, "preserved block directory should contain files")
+
+	require.NoError(t, services.StopAndAwaitTerminated(t.Context(), ls))
+}
+
+func TestPreserveSlowWALBlock_AtMostOne(t *testing.T) {
+	inst, ls := defaultInstance(t)
+
+	// Create two WAL blocks
+	createWALBlock := func() [16]byte {
+		id := test.ValidTraceID(nil)
+		pushTrace(t.Context(), t, inst, test.MakeTrace(1, id), id)
+		require.NoError(t, inst.cutIdleTraces(t.Context(), true))
+		walID, err := inst.cutBlocks(t.Context(), true)
+		require.NoError(t, err)
+		require.NotEqual(t, walID, [16]byte{})
+		return walID
+	}
+
+	walID1 := createWALBlock()
+	walID2 := createWALBlock()
+
+	// Preserve the first block
+	inst.preserveSlowWALBlock(walID1, 35*time.Second)
+
+	preservedDir := filepath.Join(inst.wal.GetFilepath(), preservedWALDir)
+	entries, err := os.ReadDir(preservedDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	firstPreserved := entries[0].Name()
+
+	// Try to preserve a second block — should be skipped
+	inst.preserveSlowWALBlock(walID2, 40*time.Second)
+
+	entries, err = os.ReadDir(preservedDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "expected still one preserved block")
+	assert.Equal(t, firstPreserved, entries[0].Name(), "preserved block should not change")
 
 	require.NoError(t, services.StopAndAwaitTerminated(t.Context(), ls))
 }
