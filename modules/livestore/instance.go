@@ -5,7 +5,11 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"io"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,7 +44,9 @@ const (
 	// backpressure is applied. In the ideal case, shutdown can leave up to 2
 	// uncompleted WAL blocks on disk, and after restart ingestion may outpace WAL
 	// completion, so we use 4 to avoid unnecessary backpressure during catch-up.
-	walBackpressureLimit = 4
+	walBackpressureLimit        = 4
+	slowCompletionThreshold     = 30 * time.Second
+	preservedWALDir             = "preserved"
 )
 
 var (
@@ -586,6 +592,8 @@ func (i *instance) completeBlock(ctx context.Context, id uuid.UUID) (*LocalBlock
 	reader := backend.NewReader(i.wal.LocalBackend())
 	writer := backend.NewWriter(i.wal.LocalBackend())
 
+	completionStart := time.Now()
+
 	iter, err := walBlock.Iterator(ctx)
 	if err != nil {
 		level.Error(i.logger).Log("msg", "failed to get WAL block iterator", "id", id, "err", err)
@@ -607,6 +615,11 @@ func (i *instance) completeBlock(ctx context.Context, id uuid.UUID) (*LocalBlock
 		level.Error(i.logger).Log("msg", "failed to open complete block", "id", id, "err", err)
 		span.RecordError(err)
 		return nil, err
+	}
+
+	completionDuration := time.Since(completionStart)
+	if completionDuration > slowCompletionThreshold {
+		i.preserveSlowWALBlock(id, completionDuration)
 	}
 
 	level.Info(i.logger).Log("msg", "swapping wal block with newly completed block")
@@ -638,6 +651,95 @@ func (i *instance) completeBlock(ctx context.Context, id uuid.UUID) (*LocalBlock
 	level.Info(i.logger).Log("msg", "completed block", "id", id.String())
 	span.AddEvent("block completed successfully")
 	return completeBlock, nil
+}
+
+// preserveSlowWALBlock copies the WAL block directory to a separate preserved folder
+// for debugging. At most one block is preserved per instance — if one already exists,
+// this is a no-op.
+func (i *instance) preserveSlowWALBlock(id uuid.UUID, completionDuration time.Duration) {
+	walPath := i.wal.GetFilepath()
+	preservedDir := filepath.Join(walPath, preservedWALDir)
+
+	// Check if there's already a preserved block
+	entries, err := os.ReadDir(preservedDir)
+	if err == nil && len(entries) > 0 {
+		level.Warn(i.logger).Log("msg", "skipping WAL block preservation, already have a preserved block", "block", id.String(), "completionDuration", completionDuration)
+		return
+	}
+
+	// Find the WAL block directory on disk
+	prefix := id.String() + "+"
+	walEntries, err := os.ReadDir(walPath)
+	if err != nil {
+		level.Error(i.logger).Log("msg", "failed to read WAL directory for preservation", "block", id.String(), "err", err)
+		return
+	}
+
+	var srcName string
+	for _, entry := range walEntries {
+		if strings.HasPrefix(entry.Name(), prefix) {
+			srcName = entry.Name()
+			break
+		}
+	}
+	if srcName == "" {
+		level.Error(i.logger).Log("msg", "WAL block directory not found for preservation", "block", id.String())
+		return
+	}
+
+	// Create preserved directory and copy
+	if err := os.MkdirAll(preservedDir, 0o700); err != nil {
+		level.Error(i.logger).Log("msg", "failed to create preserved WAL directory", "block", id.String(), "err", err)
+		return
+	}
+
+	srcDir := filepath.Join(walPath, srcName)
+	dstDir := filepath.Join(preservedDir, srcName)
+	if err := copyDir(srcDir, dstDir); err != nil {
+		level.Error(i.logger).Log("msg", "failed to copy WAL block for preservation", "block", id.String(), "err", err)
+		// Clean up partial copy
+		_ = os.RemoveAll(dstDir)
+		return
+	}
+
+	level.Warn(i.logger).Log("msg", "preserved WAL block due to slow completion", "block", id.String(), "completionDuration", completionDuration, "preservedPath", dstDir)
+}
+
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode())
+		}
+
+		return copyFile(path, target)
+	})
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
 }
 
 func (i *instance) getCompleteBlock(id uuid.UUID) *LocalBlock {
