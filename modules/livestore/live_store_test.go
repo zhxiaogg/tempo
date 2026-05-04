@@ -1,9 +1,11 @@
 package livestore
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -1294,4 +1296,147 @@ func requirePartitionOwnerEventually(t *testing.T, partitionKV kv.Client, instan
 		desc := ring.GetOrCreatePartitionRingDesc(val)
 		return desc.HasOwner(instanceID) == expected
 	}, 5*time.Second, 10*time.Millisecond, msg)
+}
+
+func TestShouldForceFromLookback_NoInstancesActivePartition(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := defaultConfig(t, tmpDir)
+
+	ls, err := liveStoreWithConfig(t, cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = services.StopAndAwaitTerminated(t.Context(), ls) })
+
+	require.Empty(t, ls.getInstances())
+
+	require.True(t, ls.shouldForceFromLookback(t.Context()),
+		"should force lookback when no local instances and partition is not Inactive")
+}
+
+func TestShouldForceFromLookback_NoInstancesInactivePartition(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := defaultConfig(t, tmpDir)
+
+	ls, err := liveStoreWithConfig(t, cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = services.StopAndAwaitTerminated(t.Context(), ls) })
+
+	require.Empty(t, ls.getInstances())
+
+	require.NoError(t, ls.ingestPartitionLifecycler.ChangePartitionState(t.Context(), ring.PartitionInactive))
+
+	require.Eventually(t, func() bool {
+		state, _, err := ls.ingestPartitionLifecycler.GetPartitionState(t.Context())
+		return err == nil && state == ring.PartitionInactive
+	}, 5*time.Second, 10*time.Millisecond, "partition should be observed as Inactive")
+
+	require.False(t, ls.shouldForceFromLookback(t.Context()),
+		"should NOT force lookback when partition is Inactive — no live ingest to recover")
+}
+
+func TestShouldForceFromLookback_InstancesExist(t *testing.T) {
+	tmpDir := t.TempDir()
+	ls, err := defaultLiveStore(t, tmpDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = services.StopAndAwaitTerminated(t.Context(), ls) })
+
+	pushToLiveStore(t, ls)
+	require.NotEmpty(t, ls.getInstances())
+
+	require.False(t, ls.shouldForceFromLookback(t.Context()),
+		"should NOT force lookback when local instances are present")
+}
+
+func TestLiveStoreSkipsLookbackOnInactivePartition(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := defaultConfig(t, tmpDir)
+
+	// Pre-seed partition 1 (matches default cfg.Ring.InstanceID="test-1") as Inactive,
+	// simulating a pod restart after the rollout-operator's prepare-partition-downscale
+	// already flipped the state and the prior incarnation drained.
+	partitionID, err := ingest.IngesterPartitionID(cfg.Ring.InstanceID)
+	require.NoError(t, err)
+	err = cfg.PartitionRing.KVStore.Mock.CAS(t.Context(), PartitionRingKey, func(in interface{}) (interface{}, bool, error) {
+		desc := ring.GetOrCreatePartitionRingDesc(in)
+		if _, ok := desc.Partitions[partitionID]; !ok {
+			desc.AddPartition(partitionID, ring.PartitionInactive, time.Now())
+		} else {
+			desc.UpdatePartitionState(partitionID, ring.PartitionInactive, time.Now())
+		}
+		return desc, true, nil
+	})
+	require.NoError(t, err)
+
+	var logBuf concurrentBuffer
+	limits, err := overrides.NewOverrides(overrides.Config{}, nil, prometheus.DefaultRegisterer)
+	require.NoError(t, err)
+	ls, err := New(cfg, limits, log.NewLogfmtLogger(&logBuf), prometheus.NewRegistry())
+	require.NoError(t, err)
+
+	require.NoError(t, services.StartAndAwaitRunning(t.Context(), ls))
+	t.Cleanup(func() { _ = services.StopAndAwaitTerminated(t.Context(), ls) })
+
+	logs := logBuf.String()
+	require.Contains(t, logs, "skipping lookback replay because partition is Inactive",
+		"expected the new Inactive-skip log line")
+	require.NotContains(t, logs, "no local data found after reload, will force reading from lookback period",
+		"should not have logged the force-lookback message when partition is Inactive")
+
+	// With the lookback skipped, the partition reader should not have fetched any
+	// records; the lag gauge should reflect "no fetches" rather than the receive_delay
+	// of stale records. Either small or absent is acceptable; what matters is it is not
+	// the large value (>1 minute) the bug produced.
+	require.Eventually(t, func() bool {
+		return getPartitionLagOrZero(t, cfg.IngestConfig.Kafka.ConsumerGroup, strconv.Itoa(int(partitionID))) < 60.0
+	}, 2*time.Second, 50*time.Millisecond,
+		"partition lag gauge should not show a >1-minute receive_delay when lookback is skipped")
+}
+
+// concurrentBuffer is a goroutine-safe bytes.Buffer for capturing log output in tests.
+type concurrentBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *concurrentBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *concurrentBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// getPartitionLagOrZero returns the tempo_ingest_group_partition_lag_seconds gauge value
+// for the given group/partition, or 0 if the metric is not published. Unlike
+// getPartitionLagSecondsFromGatherer, it does not fail the test when the metric is missing,
+// because skipping lookback can leave the gauge unpublished.
+func getPartitionLagOrZero(t *testing.T, group, partition string) float64 {
+	t.Helper()
+
+	families, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+
+	for _, f := range families {
+		if f.GetName() != "tempo_ingest_group_partition_lag_seconds" {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			var matchGroup, matchPartition bool
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "group" && l.GetValue() == group {
+					matchGroup = true
+				}
+				if l.GetName() == "partition" && l.GetValue() == partition {
+					matchPartition = true
+				}
+			}
+			if matchGroup && matchPartition {
+				return m.GetGauge().GetValue()
+			}
+		}
+	}
+	return 0
 }

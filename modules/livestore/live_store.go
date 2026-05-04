@@ -354,8 +354,29 @@ func (s *LiveStore) startIngestPath(ctx context.Context) error {
 	return s.startKafkaIngestPath(ctx)
 }
 
+// shouldForceFromLookback returns true if the live-store must re-read the Kafka
+// lookback to rebuild query state. Returns false when local instances already
+// exist, or when the partition is Inactive — in that case producers have
+// stopped writing and the prior pod drained the partition during the
+// rollout-operator's downscale_delay window, so there is nothing to recover.
+func (s *LiveStore) shouldForceFromLookback(ctx context.Context) bool {
+	if len(s.getInstances()) > 0 {
+		return false
+	}
+	state, _, err := s.ingestPartitionLifecycler.GetPartitionState(ctx)
+	if err != nil {
+		level.Warn(s.logger).Log("msg", "failed to read partition state during startup; defaulting to lookback replay", "err", err)
+		return true
+	}
+	if state == ring.PartitionInactive {
+		level.Info(s.logger).Log("msg", "skipping lookback replay because partition is Inactive — no live ingest to recover")
+		return false
+	}
+	return true
+}
+
 func (s *LiveStore) startKafkaIngestPath(ctx context.Context) error {
-	forceFromLookback := len(s.getInstances()) == 0
+	forceFromLookback := s.shouldForceFromLookback(ctx)
 	if forceFromLookback {
 		level.Info(s.logger).Log("msg", "no local data found after reload, will force reading from lookback period")
 	}
