@@ -1703,6 +1703,13 @@ func createAllIterator(ctx context.Context, primaryIter parquetquery.Iterator, c
 	traceSampler traceql.Sampler,
 	spanSampler traceql.Sampler,
 ) (parquetquery.Iterator, error) {
+	// Rewrite unscoped conditions to a concrete scope when the data in this fetch
+	// only carries the key in one scope. This preserves AllConditions and lets
+	// coalesce_conditions fold predicates on the same dedicated column.
+	if EnableDemingleUnscopedConditions && containsUnscopedNonIntrinsic(conditions) {
+		conditions = demingleUnscopedConditions(conditions, newParquetHasKeyFn(pf, rgs, dc))
+	}
+
 	// categorize conditions by scope
 	catConditions, mingledConditions, err := categorizeConditions(conditions)
 	if err != nil {
