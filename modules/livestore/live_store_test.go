@@ -283,7 +283,7 @@ func TestLiveStoreFullBlockLifecycleCheating(t *testing.T) {
 	require.NoError(t, err)
 
 	requireTraceInLiveStore(t, liveStore, expectedID, expectedTrace)
-	requireTraceInBlock(t, inst.walBlocks[walUUID], expectedID, expectedTrace)
+	requireTraceInBlock(t, inst.walBlocks.loadBlock(walUUID), expectedID, expectedTrace)
 	requireInstanceState(t, inst, instanceState{liveTraces: 0, walBlocks: 1, completeBlocks: 0})
 
 	// force complete the wal block
@@ -291,7 +291,7 @@ func TestLiveStoreFullBlockLifecycleCheating(t *testing.T) {
 	require.NoError(t, err)
 
 	requireTraceInLiveStore(t, liveStore, expectedID, expectedTrace)
-	requireTraceInBlock(t, inst.completeBlocks[walUUID], expectedID, expectedTrace)
+	requireTraceInBlock(t, inst.completeBlocks.loadBlock(walUUID), expectedID, expectedTrace)
 	requireInstanceState(t, inst, instanceState{liveTraces: 0, walBlocks: 0, completeBlocks: 1})
 
 	// stop gracefully
@@ -439,7 +439,7 @@ func TestLiveStoreDropsInvalidCompleteBlocksOnRestart(t *testing.T) {
 	requireInstanceState(t, inst, instanceState{liveTraces: 0, walBlocks: 0, completeBlocks: 1})
 
 	var blockID uuid.UUID
-	for id := range inst.completeBlocks {
+	for id := range inst.completeBlocks.snapshot() {
 		blockID = id
 		break
 	}
@@ -679,7 +679,7 @@ func TestLiveStoreUsesRecordTimestampForBlockStartAndEnd(t *testing.T) {
 		_, err = inst.completeBlock(t.Context(), uuid)
 		require.NoError(t, err)
 
-		meta = inst.completeBlocks[uuid].BlockMeta()
+		meta = inst.completeBlocks.loadBlock(uuid).BlockMeta()
 		require.Equal(t, tc.expectedStart, meta.StartTime)
 		require.Equal(t, tc.expectedEnd, meta.EndTime)
 
@@ -1004,8 +1004,8 @@ func createRecordIter(records []*kgo.Record) recordIter {
 
 func requireInstanceState(t *testing.T, inst *instance, state instanceState) {
 	require.Equal(t, uint64(state.liveTraces), inst.liveTraces.Len(), "live traces count mismatch")
-	require.Len(t, inst.walBlocks, state.walBlocks, "wal blocks count mismatch")
-	require.Len(t, inst.completeBlocks, state.completeBlocks, "complete blocks count mismatch")
+	require.Equal(t, state.walBlocks, inst.walBlocks.count(), "wal blocks count mismatch")
+	require.Equal(t, state.completeBlocks, inst.completeBlocks.count(), "complete blocks count mismatch")
 }
 
 func requireTraceInLiveStore(t *testing.T, liveStore *LiveStore, traceID []byte, expectedTrace *tempopb.Trace) {

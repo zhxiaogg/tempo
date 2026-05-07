@@ -215,7 +215,7 @@ func TestLocalCompleteBlockLifecycleOnCompletedBlockEnqueuesBlock(t *testing.T) 
 	lifecycle, ok := lifecycleAny.(*localCompleteBlockLifecycle)
 	require.True(t, ok)
 
-	block := inst.completeBlocks[blockID]
+	block := inst.completeBlocks.loadBlock(blockID)
 	require.NoError(t, lifecycle.onCompletedBlock(t.Context(), testTenantID, block))
 	require.False(t, lifecycle.completeBlockQueue.IsEmpty())
 }
@@ -239,7 +239,7 @@ func TestLocalCompleteBlockLifecycleStopCancelsInFlightFlush(t *testing.T) {
 	lifecycle, ok := lifecycleAny.(*localCompleteBlockLifecycle)
 	require.True(t, ok)
 
-	block := inst.completeBlocks[blockID]
+	block := inst.completeBlocks.loadBlock(blockID)
 	require.NoError(t, lifecycle.onCompletedBlock(t.Context(), testTenantID, block))
 
 	lifecycle.start(t.Context())
@@ -287,7 +287,7 @@ func TestLocalCompleteBlockLifecycleOnReloadedBlockEnqueuesUnflushedBlock(t *tes
 	lifecycle, ok := lifecycleAny.(*localCompleteBlockLifecycle)
 	require.True(t, ok)
 
-	block := inst.completeBlocks[blockID]
+	block := inst.completeBlocks.loadBlock(blockID)
 	require.NoError(t, lifecycle.onReloadedBlock(t.Context(), testTenantID, block))
 	require.False(t, lifecycle.completeBlockQueue.IsEmpty())
 }
@@ -310,7 +310,7 @@ func TestLocalCompleteBlockLifecycleOnReloadedBlockSkipsFlushedBlock(t *testing.
 	lifecycle, ok := lifecycleAny.(*localCompleteBlockLifecycle)
 	require.True(t, ok)
 
-	block := inst.completeBlocks[blockID]
+	block := inst.completeBlocks.loadBlock(blockID)
 	require.NoError(t, block.SetFlushed(t.Context()))
 	require.NoError(t, lifecycle.onReloadedBlock(t.Context(), testTenantID, block))
 	require.True(t, lifecycle.completeBlockQueue.IsEmpty())
@@ -331,7 +331,7 @@ func TestLocalCompleteBlockLifecycleRetriesFailedFlush(t *testing.T) {
 	})
 
 	inst, blockID := createCompleteBlockForLifecycleTest(t, liveStore)
-	block := inst.completeBlocks[blockID]
+	block := inst.completeBlocks.loadBlock(blockID)
 
 	synctest.Test(t, func(t *testing.T) {
 		flusher := &failOnceCompleteBlockFlusher{}
@@ -370,7 +370,7 @@ func TestLocalCompleteBlockLifecycleStartStopProcessesQueuedBlocks(t *testing.T)
 	lifecycle, ok := lifecycleAny.(*localCompleteBlockLifecycle)
 	require.True(t, ok)
 
-	block := inst.completeBlocks[blockID]
+	block := inst.completeBlocks.loadBlock(blockID)
 	require.NoError(t, lifecycle.onCompletedBlock(t.Context(), testTenantID, block))
 	require.False(t, lifecycle.completeBlockQueue.IsEmpty())
 
@@ -431,7 +431,7 @@ func TestLiveStoreProcessCompleteOpCallsCompleteBlockLifecycle(t *testing.T) {
 		maxBackoff: liveStore.cfg.maxBackoff,
 	})
 	require.NoError(t, err)
-	require.Contains(t, inst.completeBlocks, blockID)
+	require.NotNil(t, inst.completeBlocks.loadBlock(blockID))
 	require.Equal(t, []completeBlockLifecycleCall{{tenantID: testTenantID, blockID: blockID}}, lifecycle.completedCalls)
 }
 
@@ -463,7 +463,7 @@ func TestLiveStoreProcessCompleteOpRetriesLifecycleUsingExistingCompleteBlock(t 
 
 	err = liveStore.processCompleteOp(op)
 	require.NoError(t, err)
-	require.Contains(t, inst.completeBlocks, blockID)
+	require.NotNil(t, inst.completeBlocks.loadBlock(blockID))
 	require.Equal(t, []completeBlockLifecycleCall{{tenantID: testTenantID, blockID: blockID}}, lifecycle.completedCalls)
 
 	err = liveStore.processCompleteOp(op)
@@ -519,12 +519,12 @@ func TestLocalCompleteBlockLifecycleDeleteOldBlocksDeletesFlushedBlocksByAge(t *
 	})
 
 	inst, blockID := createCompleteBlockForLifecycleTest(t, liveStore)
-	block := inst.completeBlocks[blockID]
+	block := inst.completeBlocks.loadBlock(blockID)
 	require.NoError(t, block.SetFlushed(t.Context()))
-	inst.completeBlocks[blockID].BlockMeta().EndTime = time.Now().Add(-liveStore.cfg.CompleteBlockTimeout - time.Second)
+	inst.completeBlocks.loadBlock(blockID).BlockMeta().EndTime = time.Now().Add(-liveStore.cfg.CompleteBlockTimeout - time.Second)
 
 	require.NoError(t, inst.deleteOldBlocks())
-	require.Len(t, inst.completeBlocks, 0)
+	require.Equal(t, 0, inst.completeBlocks.count())
 }
 
 func TestLocalCompleteBlockLifecycleDeleteOldBlocksKeepsUnflushedBlocks(t *testing.T) {
@@ -540,10 +540,10 @@ func TestLocalCompleteBlockLifecycleDeleteOldBlocksKeepsUnflushedBlocks(t *testi
 	})
 
 	inst, blockID := createCompleteBlockForLifecycleTest(t, liveStore)
-	inst.completeBlocks[blockID].BlockMeta().EndTime = time.Now().Add(-liveStore.cfg.CompleteBlockTimeout - time.Second)
+	inst.completeBlocks.loadBlock(blockID).BlockMeta().EndTime = time.Now().Add(-liveStore.cfg.CompleteBlockTimeout - time.Second)
 
 	require.NoError(t, inst.deleteOldBlocks())
-	require.Len(t, inst.completeBlocks, 1)
+	require.Equal(t, 1, inst.completeBlocks.count())
 }
 
 func TestInstanceDeleteOldBlocksUsesCompleteBlockLifecycle(t *testing.T) {
@@ -585,10 +585,10 @@ func TestInstanceDeleteOldBlocksUsesCompleteBlockLifecycle(t *testing.T) {
 			if tc.lifecycle != nil {
 				inst.completeBlockLifecycle = tc.lifecycle
 			}
-			inst.completeBlocks[blockID].BlockMeta().EndTime = time.Now().Add(-liveStore.cfg.CompleteBlockTimeout - time.Second)
+			inst.completeBlocks.loadBlock(blockID).BlockMeta().EndTime = time.Now().Add(-liveStore.cfg.CompleteBlockTimeout - time.Second)
 
 			require.NoError(t, inst.deleteOldBlocks())
-			require.Len(t, inst.completeBlocks, tc.wantRemaining)
+			require.Equal(t, tc.wantRemaining, inst.completeBlocks.count())
 		})
 	}
 }
@@ -607,7 +607,7 @@ func createWalBlockForLifecycleTest(t *testing.T, liveStore *LiveStore) (*instan
 	blockID, err := inst.cutBlocks(t.Context(), true)
 	require.NoError(t, err)
 	require.NotEqual(t, uuid.Nil, blockID)
-	require.NotContains(t, inst.completeBlocks, blockID)
+	require.Nil(t, inst.completeBlocks.loadBlock(blockID))
 
 	return inst, blockID
 }
@@ -618,7 +618,7 @@ func createCompleteBlockForLifecycleTest(t *testing.T, liveStore *LiveStore) (*i
 	inst, blockID := createWalBlockForLifecycleTest(t, liveStore)
 	_, err := inst.completeBlock(t.Context(), blockID)
 	require.NoError(t, err)
-	require.Contains(t, inst.completeBlocks, blockID)
+	require.NotNil(t, inst.completeBlocks.loadBlock(blockID))
 
 	return inst, blockID
 }

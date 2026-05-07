@@ -114,11 +114,22 @@ type instance struct {
 	completeBlockEncoding  encoding.VersionedEncoding
 	completeBlockLifecycle completeBlockLifecycle
 
-	// Block management
-	blocksMtx      sync.RWMutex
+	// Block management.
+	//
+	// headBlockMtx protects the headBlock pointer, lastCutTime, and the
+	// content of headBlock (which is mutated by ingestion via AppendTrace).
+	// Queries that read the head block must hold headBlockMtx.RLock for the
+	// duration of the read so they don't observe a partially-written block.
+	//
+	// walBlocks and completeBlocks are sync.Map-based stores. WAL and
+	// complete blocks are immutable once installed, so reads do not need a
+	// global lock. Per-entry RWMutexes (see walBlockEntry / completeBlockEntry)
+	// coordinate concurrent queries with the eventual deletion or transition
+	// of an individual block.
+	headBlockMtx   sync.RWMutex
 	headBlock      common.WALBlock
-	walBlocks      map[uuid.UUID]common.WALBlock
-	completeBlocks map[uuid.UUID]*LocalBlock
+	walBlocks      walBlockMap
+	completeBlocks completeBlockMap
 	lastCutTime    time.Time
 
 	// Live traces
@@ -152,8 +163,6 @@ func newInstance(instanceID string, cfg Config, wal *wal.WAL, completeBlockEncod
 		wal:                    wal,
 		completeBlockEncoding:  completeBlockEncoding,
 		completeBlockLifecycle: completeBlockLifecycle,
-		walBlocks:              map[uuid.UUID]common.WALBlock{},
-		completeBlocks:         map[uuid.UUID]*LocalBlock{},
 		liveTraces:             livetraces.New[*v1.ResourceSpans](func(rs *v1.ResourceSpans) uint64 { return uint64(rs.Size()) }, cfg.MaxTraceIdle, cfg.MaxTraceLive, instanceID),
 		traceSizes:             tracesizes.New(),
 		maxTraceLogger:         util_log.NewRateLimitedLogger(maxTraceLogLinesPerSecond, level.Warn(logger)),
@@ -216,9 +225,7 @@ func (i *instance) backpressure(ctx context.Context) bool {
 	}
 
 	// Check outstanding wal blocks
-	i.blocksMtx.RLock()
-	count := len(i.walBlocks)
-	i.blocksMtx.RUnlock()
+	count := i.walBlocks.count()
 
 	if count > walBackpressureLimit {
 		// There are multiple outstanding WAL blocks that need completion
@@ -388,11 +395,11 @@ func (i *instance) cutIdleTraces(ctx context.Context, immediate bool) (bool, err
 
 	span.AddEvent("wrote traces to head block")
 
-	i.blocksMtx.Lock()
-	span.AddEvent("acquired blocksMtx")
+	i.headBlockMtx.Lock()
+	span.AddEvent("acquired headBlockMtx")
 	defer func() {
-		i.blocksMtx.Unlock()
-		span.AddEvent("released blocksMtx")
+		i.headBlockMtx.Unlock()
+		span.AddEvent("released headBlockMtx")
 	}()
 	if i.headBlock != nil {
 		err := i.headBlock.Flush()
@@ -406,8 +413,8 @@ func (i *instance) cutIdleTraces(ctx context.Context, immediate bool) (bool, err
 }
 
 func (i *instance) writeHeadBlock(id []byte, liveTrace *livetraces.LiveTrace[*v1.ResourceSpans]) (uint64, error) {
-	i.blocksMtx.Lock()
-	defer i.blocksMtx.Unlock()
+	i.headBlockMtx.Lock()
+	defer i.headBlockMtx.Unlock()
 
 	if i.headBlock == nil {
 		err := i.resetHeadBlock()
@@ -497,7 +504,7 @@ const (
 )
 
 // shouldCutHead checks whether the head block should be cut and returns the
-// reason(s). Caller must hold blocksMtx.
+// reason(s). Caller must hold headBlockMtx.
 func (i *instance) shouldCutHead(immediate bool) cutReason {
 	if i.headBlock == nil || i.headBlock.DataLength() == 0 {
 		return cutReasonNone
@@ -535,11 +542,11 @@ func (i *instance) cutBlocks(ctx context.Context, immediate bool) (uuid.UUID, er
 		oteltrace.WithAttributes(attribute.String("tenant", i.tenantID)))
 	defer span.End()
 
-	i.blocksMtx.Lock()
-	span.AddEvent("acquired blocksMtx")
+	i.headBlockMtx.Lock()
+	span.AddEvent("acquired headBlockMtx")
 	defer func() {
-		i.blocksMtx.Unlock()
-		span.AddEvent("released blocksMtx")
+		i.headBlockMtx.Unlock()
+		span.AddEvent("released headBlockMtx")
 	}()
 
 	reason := i.shouldCutHead(immediate)
@@ -559,7 +566,7 @@ func (i *instance) cutBlocks(ctx context.Context, immediate bool) (uuid.UUID, er
 
 	id := (uuid.UUID)(i.headBlock.BlockMeta().BlockID)
 	blockSize := i.headBlock.DataLength()
-	i.walBlocks[id] = i.headBlock
+	i.walBlocks.store(id, newWALBlockEntry(i.headBlock))
 
 	span.SetAttributes(
 		attribute.String("blockID", id.String()),
@@ -588,17 +595,13 @@ func (i *instance) completeBlock(ctx context.Context, id uuid.UUID) (*LocalBlock
 		))
 	defer span.End()
 
-	i.blocksMtx.Lock()
-	span.AddEvent("acquired blocksMtx")
-	walBlock := i.walBlocks[id]
-	i.blocksMtx.Unlock()
-	span.AddEvent("released blocksMtx")
-
-	if walBlock == nil {
+	walEntry, ok := i.walBlocks.load(id)
+	if !ok {
 		level.Warn(i.logger).Log("msg", "WAL block disappeared before being completed", "id", id)
 		span.AddEvent("WAL block not found")
 		return nil, nil
 	}
+	walBlock := walEntry.block
 
 	blockSize := walBlock.DataLength()
 
@@ -646,15 +649,9 @@ func (i *instance) completeBlock(ctx context.Context, id uuid.UUID) (*LocalBlock
 
 	level.Info(i.logger).Log("msg", "swapping wal block with newly completed block")
 
-	i.blocksMtx.Lock()
-	span.AddEvent("acquired blocksMtx")
-	defer func() {
-		i.blocksMtx.Unlock()
-		span.AddEvent("released blocksMtx")
-	}()
-
-	// Verify the WAL block still exists
-	if _, ok := i.walBlocks[id]; !ok {
+	// Verify the WAL block still exists. deleteOldBlocks may have removed it
+	// while the long-running CreateBlock was in progress.
+	if _, stillThere := i.walBlocks.load(id); !stillThere {
 		level.Warn(i.logger).Log("msg", "WAL block disappeared while being completed, deleting complete block", "id", id)
 		err := i.wal.LocalBackend().ClearBlock(id, i.tenantID)
 		if err != nil {
@@ -666,14 +663,21 @@ func (i *instance) completeBlock(ctx context.Context, id uuid.UUID) (*LocalBlock
 	}
 
 	completeBlock := NewLocalBlock(ctx, newBlock, i.wal.LocalBackend())
-	i.completeBlocks[id] = completeBlock
 
-	err = walBlock.Clear()
-	if err != nil {
+	// Install the complete block before removing the WAL entry so that any
+	// concurrent query iterating the snapshot finds at least one tier with
+	// the data; the iterator dedupes by block ID so observing both tiers is
+	// safe.
+	i.completeBlocks.store(id, newCompleteBlockEntry(completeBlock))
+
+	// Remove the WAL entry from the lookup map first so new queries don't
+	// pick it up, then take the per-entry write lock to wait for any
+	// in-flight readers before clearing the on-disk WAL block.
+	i.walBlocks.delete(id)
+	if err := walEntry.clear(func(b common.WALBlock) error { return b.Clear() }); err != nil {
 		level.Error(i.logger).Log("msg", "failed to clear WAL block", "id", id, "err", err)
 		span.RecordError(err)
 	}
-	delete(i.walBlocks, (uuid.UUID)(walBlock.BlockMeta().BlockID))
 
 	level.Info(i.logger).Log("msg", "completed block", "id", id.String())
 	span.AddEvent("block completed successfully")
@@ -681,43 +685,51 @@ func (i *instance) completeBlock(ctx context.Context, id uuid.UUID) (*LocalBlock
 }
 
 func (i *instance) getCompleteBlock(id uuid.UUID) *LocalBlock {
-	i.blocksMtx.RLock()
-	defer i.blocksMtx.RUnlock()
-
-	return i.completeBlocks[id]
+	entry, ok := i.completeBlocks.load(id)
+	if !ok {
+		return nil
+	}
+	// The caller doesn't synchronise with deletion via the per-entry lock
+	// here (existing semantics), but the underlying *LocalBlock is reusable
+	// and read-only.
+	return entry.block
 }
 
 func (i *instance) deleteOldBlocks() error {
-	i.blocksMtx.Lock()
-	defer i.blocksMtx.Unlock()
-
 	cutoff := time.Now().Add(-i.Cfg.CompleteBlockTimeout) // Delete blocks older than Complete Block Timeout
 
-	for id, walBlock := range i.walBlocks {
-		if walBlock.BlockMeta().EndTime.Before(cutoff) {
-			if _, ok := i.completeBlocks[id]; !ok {
-				level.Warn(i.logger).Log("msg", "deleting WAL block that was never completed", "block", id.String())
-			}
-			err := walBlock.Clear()
-			if err != nil {
-				return err
-			}
-			delete(i.walBlocks, id)
-			metricBlocksClearedTotal.WithLabelValues("wal").Inc()
+	for id, walEntry := range i.walBlocks.snapshot() {
+		walBlock := walEntry.block
+		if !walBlock.BlockMeta().EndTime.Before(cutoff) {
+			continue
 		}
+		if _, ok := i.completeBlocks.load(id); !ok {
+			level.Warn(i.logger).Log("msg", "deleting WAL block that was never completed", "block", id.String())
+		}
+		// Remove from the lookup map first so new queries don't see it,
+		// then take the per-entry write lock to wait for in-flight readers
+		// before clearing the on-disk block.
+		i.walBlocks.delete(id)
+		if err := walEntry.clear(func(b common.WALBlock) error { return b.Clear() }); err != nil {
+			return err
+		}
+		metricBlocksClearedTotal.WithLabelValues("wal").Inc()
 	}
 
-	for id, completeBlock := range i.completeBlocks {
+	for id, completeEntry := range i.completeBlocks.snapshot() {
+		completeBlock := completeEntry.block
 		if !i.completeBlockLifecycle.shouldDeleteCompleteBlock(completeBlock, cutoff) {
 			continue
 		}
 
 		level.Info(i.logger).Log("msg", "deleting complete block", "block", id.String())
-		err := i.wal.LocalBackend().ClearBlock(id, i.tenantID)
+		i.completeBlocks.delete(id)
+		err := completeEntry.clear(func(b *LocalBlock) error {
+			return i.wal.LocalBackend().ClearBlock((uuid.UUID)(b.BlockMeta().BlockID), i.tenantID)
+		})
 		if err != nil {
 			return err
 		}
-		delete(i.completeBlocks, id)
 		metricBlocksClearedTotal.WithLabelValues("complete").Inc()
 	}
 

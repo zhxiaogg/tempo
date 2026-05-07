@@ -55,17 +55,24 @@ type blockFn func(ctx context.Context, meta *backend.BlockMeta, b block) error
 
 // iterateBlocks provides a way to iterate over all blocks (head, wal, complete)
 // using concurrent processing with bounded concurrency.
+//
+// Locking strategy:
+//   - The head block is read while holding headBlockMtx.RLock so that
+//     ingestion writes (which take the corresponding write lock) cannot race
+//     with the search.
+//   - WAL and complete blocks are stored in sync.Map and processed without a
+//     global lock. Each block has its own RWMutex; the iterator acquires the
+//     read lock for the duration of fn so the block can't be cleared
+//     mid-query, while writers (completeBlock / deleteOldBlocks) take the
+//     write lock when transitioning or deleting a block.
+//   - Because a block may transition tiers (head → wal, wal → complete)
+//     concurrently with iteration, the same block ID may appear in more
+//     than one snapshot. We deduplicate by block ID, processing the most
+//     advanced tier we observed.
 func (i *instance) iterateBlocks(ctx context.Context, reqStart, reqEnd time.Time, fn blockFn) error {
 	ctx, span := tracer.Start(ctx, "instance.iterateBlocks",
 		oteltrace.WithAttributes(attribute.String("tenant", i.tenantID)))
 	defer span.End()
-
-	i.blocksMtx.RLock()
-	span.AddEvent("acquired blocksMtx")
-	defer func() {
-		i.blocksMtx.RUnlock()
-		span.AddEvent("released blocksMtx")
-	}()
 
 	var anyErr atomic.Error
 	ctx, cancel := context.WithCancel(ctx)
@@ -86,17 +93,17 @@ func (i *instance) iterateBlocks(ctx context.Context, reqStart, reqEnd time.Time
 		anyErr.Store(err)
 	}
 
-	if i.headBlock != nil {
-		meta := i.headBlock.BlockMeta()
-		if includeBlock(meta, reqStart, reqEnd) {
-			ctx, span := tracer.Start(ctx, "process.headBlock")
-			span.SetAttributes(attribute.String("blockID", meta.BlockID.String()))
+	// processedIDs tracks blocks already handled via an earlier tier so we
+	// don't process the same data twice if a block transitions during the
+	// snapshot.
+	processedIDs := map[uuid.UUID]struct{}{}
 
-			if err := fn(ctx, meta, i.headBlock); err != nil {
-				handleErr(fmt.Errorf("processing head block (%s): %w", meta.BlockID, err))
-			}
-			span.End()
-		}
+	// Process the head block synchronously while holding headBlockMtx.RLock.
+	// The lock briefly serialises with ingestion writes; subsequent wal /
+	// complete iteration runs without any global lock.
+	headBlockID, headProcessed := i.processHeadBlock(ctx, reqStart, reqEnd, fn, handleErr)
+	if headProcessed {
+		processedIDs[headBlockID] = struct{}{}
 	}
 
 	if err := anyErr.Load(); err != nil {
@@ -105,53 +112,42 @@ func (i *instance) iterateBlocks(ctx context.Context, reqStart, reqEnd time.Time
 
 	wg := boundedwaitgroup.New(i.Cfg.QueryBlockConcurrency)
 
-	// Process wal blocks
-	for _, b := range i.walBlocks {
-		if ctx.Err() != nil {
-			continue
-		}
-
-		meta := b.BlockMeta()
-		if !includeBlock(meta, reqStart, reqEnd) {
-			continue
-		}
-
-		wg.Add(1)
-		go func(block common.WALBlock) {
-			defer wg.Done()
-
-			if ctx.Err() != nil {
-				return
-			}
-
-			ctx, span := tracer.Start(ctx, "process.walBlock")
-			span.SetAttributes(attribute.String("blockID", meta.BlockID.String()))
-			defer span.End()
-
-			if err := fn(ctx, meta, block); err != nil {
-				handleErr(fmt.Errorf("processing wal block (%s): %w", meta.BlockID, err))
-			}
-		}(b)
-	}
+	// Snapshot complete blocks first. Then snapshot wal blocks. Order
+	// matters: completeBlock installs the new complete entry before
+	// removing the wal entry, so visiting complete first guarantees we see
+	// at least one tier for any block in flight at the moment of the
+	// snapshot.
+	completeSnap := i.completeBlocks.snapshot()
+	walSnap := i.walBlocks.snapshot()
 
 	// Process complete blocks
-	for _, b := range i.completeBlocks {
+	for id, entry := range completeSnap {
 		if ctx.Err() != nil {
 			continue
 		}
+		if _, seen := processedIDs[id]; seen {
+			continue
+		}
+		processedIDs[id] = struct{}{}
 
-		meta := b.BlockMeta()
+		meta := entry.block.BlockMeta()
 		if !includeBlock(meta, reqStart, reqEnd) {
 			continue
 		}
 
 		wg.Add(1)
-		go func(block *LocalBlock) {
+		go func(e *completeBlockEntry, meta *backend.BlockMeta) {
 			defer wg.Done()
 
 			if ctx.Err() != nil {
 				return
 			}
+
+			block, release, ok := e.acquire()
+			if !ok {
+				return
+			}
+			defer release()
 
 			ctx, span := tracer.Start(ctx, "process.completeBlock")
 			span.SetAttributes(attribute.String("blockID", meta.BlockID.String()))
@@ -160,7 +156,46 @@ func (i *instance) iterateBlocks(ctx context.Context, reqStart, reqEnd time.Time
 			if err := fn(ctx, meta, block); err != nil {
 				handleErr(fmt.Errorf("processing complete block (%s): %w", meta.BlockID, err))
 			}
-		}(b)
+		}(entry, meta)
+	}
+
+	// Process wal blocks
+	for id, entry := range walSnap {
+		if ctx.Err() != nil {
+			continue
+		}
+		if _, seen := processedIDs[id]; seen {
+			continue
+		}
+		processedIDs[id] = struct{}{}
+
+		meta := entry.block.BlockMeta()
+		if !includeBlock(meta, reqStart, reqEnd) {
+			continue
+		}
+
+		wg.Add(1)
+		go func(e *walBlockEntry, meta *backend.BlockMeta) {
+			defer wg.Done()
+
+			if ctx.Err() != nil {
+				return
+			}
+
+			block, release, ok := e.acquire()
+			if !ok {
+				return
+			}
+			defer release()
+
+			ctx, span := tracer.Start(ctx, "process.walBlock")
+			span.SetAttributes(attribute.String("blockID", meta.BlockID.String()))
+			defer span.End()
+
+			if err := fn(ctx, meta, block); err != nil {
+				handleErr(fmt.Errorf("processing wal block (%s): %w", meta.BlockID, err))
+			}
+		}(entry, meta)
 	}
 
 	wg.Wait()
@@ -170,6 +205,34 @@ func (i *instance) iterateBlocks(ctx context.Context, reqStart, reqEnd time.Time
 	}
 
 	return nil
+}
+
+// processHeadBlock invokes fn for the head block (if it exists and overlaps
+// the request range) while holding headBlockMtx.RLock, so the head block is
+// not mutated by ingestion during the read. Returns the block ID that was
+// processed (zero UUID if none) and whether it was processed.
+func (i *instance) processHeadBlock(ctx context.Context, reqStart, reqEnd time.Time, fn blockFn, handleErr func(error)) (uuid.UUID, bool) {
+	i.headBlockMtx.RLock()
+	defer i.headBlockMtx.RUnlock()
+
+	if i.headBlock == nil {
+		return uuid.Nil, false
+	}
+
+	meta := i.headBlock.BlockMeta()
+	id := (uuid.UUID)(meta.BlockID)
+	if !includeBlock(meta, reqStart, reqEnd) {
+		return id, true
+	}
+
+	ctx, span := tracer.Start(ctx, "process.headBlock")
+	span.SetAttributes(attribute.String("blockID", meta.BlockID.String()))
+	defer span.End()
+
+	if err := fn(ctx, meta, i.headBlock); err != nil {
+		handleErr(fmt.Errorf("processing head block (%s): %w", meta.BlockID, err))
+	}
+	return id, true
 }
 
 func (i *instance) Search(ctx context.Context, req *tempopb.SearchRequest) (*tempopb.SearchResponse, error) {

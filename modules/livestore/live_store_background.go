@@ -303,18 +303,15 @@ func (s *LiveStore) reloadBlocks() error {
 				return fmt.Errorf("failed to get or create instance for tenant %s: %w", meta.TenantID, err)
 			}
 
-			inst.blocksMtx.Lock()
-			defer inst.blocksMtx.Unlock()
-
 			level.Info(s.logger).Log("msg", "reloaded wal block", "block", meta.BlockID.String())
-			inst.walBlocks[(uuid.UUID)(meta.BlockID)] = blk
+			inst.walBlocks.store((uuid.UUID)(meta.BlockID), newWALBlockEntry(blk))
 
 			level.Info(s.logger).Log("msg", "queueing replayed wal block for completion", "block", meta.BlockID.String(), "size", blk.DataLength())
 			if err := s.enqueueCompleteOp(meta.TenantID, uuid.UUID(meta.BlockID), true); err != nil {
 				return fmt.Errorf("failed to enqueue wal block for completion for tenant %s: %w", meta.TenantID, err)
 			}
 
-			level.Info(s.logger).Log("msg", "reloaded wal blocks", "tenant", inst.tenantID, "count", len(inst.walBlocks))
+			level.Info(s.logger).Log("msg", "reloaded wal blocks", "tenant", inst.tenantID, "count", inst.walBlocks.count())
 
 			return nil
 		}()
@@ -401,9 +398,7 @@ func (s *LiveStore) reloadBlocks() error {
 				return fmt.Errorf("failed to get or create instance for tenant %s during complete block reload: %w", tenant, err)
 			}
 
-			inst.blocksMtx.Lock()
-			inst.completeBlocks[id] = lb
-			inst.blocksMtx.Unlock()
+			inst.completeBlocks.store(id, newCompleteBlockEntry(lb))
 
 			if err := s.completeBlockLifecycle.onReloadedBlock(ctx, tenant, lb); err != nil {
 				return fmt.Errorf("failed to apply complete block lifecycle to reloaded block %s in tenant %s: %w", id.String(), tenant, err)
