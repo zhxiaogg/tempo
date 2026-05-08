@@ -84,6 +84,16 @@ var (
 		Name:      "blocks_cut_total",
 		Help:      "The total number of blocks cut by reason.",
 	}, []string{"reason"})
+	metricQueryInspectedBytes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "tempo_live_store",
+		Name:      "query_inspected_bytes_total",
+		Help:      "The total bytes inspected by queries per tenant.",
+	}, []string{"tenant"})
+	metricQueryInspectedBlocks = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "tempo_live_store",
+		Name:      "query_inspected_blocks_total",
+		Help:      "The total blocks inspected by queries per tenant.",
+	}, []string{"tenant"})
 	metricBackPressure = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "tempo",
 		Subsystem: "live_store",

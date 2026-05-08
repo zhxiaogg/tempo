@@ -72,6 +72,11 @@ func (i *instance) iterateBlocks(ctx context.Context, reqStart, reqEnd time.Time
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// Per-tenant counter for blocks inspected by queries. Recorded incrementally
+	// per visited block so partial work is observable on cancel/error. Future
+	// rate limiting on blocks would slot in next to this Inc().
+	blocksMetric := metricQueryInspectedBlocks.WithLabelValues(i.tenantID)
+
 	handleErr := func(err error) {
 		if err == nil {
 			return
@@ -93,6 +98,7 @@ func (i *instance) iterateBlocks(ctx context.Context, reqStart, reqEnd time.Time
 			ctx, span := tracer.Start(ctx, "process.headBlock")
 			span.SetAttributes(attribute.String("blockID", meta.BlockID.String()))
 
+			blocksMetric.Inc()
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
@@ -143,6 +149,7 @@ func (i *instance) iterateBlocks(ctx context.Context, reqStart, reqEnd time.Time
 			span.SetAttributes(attribute.String("blockID", meta.BlockID.String()))
 			defer span.End()
 
+			blocksMetric.Inc()
 			if err := fn(ctx, meta, block); err != nil {
 				handleErr(fmt.Errorf("processing wal block (%s): %w", meta.BlockID, err))
 			}
@@ -178,6 +185,7 @@ func (i *instance) iterateBlocks(ctx context.Context, reqStart, reqEnd time.Time
 			span.SetAttributes(attribute.String("blockID", meta.BlockID.String()))
 			defer span.End()
 
+			blocksMetric.Inc()
 			if err := fn(ctx, meta, block); err != nil {
 				handleErr(fmt.Errorf("processing complete block (%s): %w", meta.BlockID, err))
 			}
@@ -219,10 +227,11 @@ func (i *instance) Search(ctx context.Context, req *tempopb.SearchRequest) (*tem
 	}
 
 	var (
-		resultsMtx = sync.Mutex{}
-		combiner   = traceql.NewMetadataCombiner(maxResults, mostRecent)
-		metrics    = &tempopb.SearchMetrics{}
-		opts       = common.DefaultSearchOptions()
+		resultsMtx   = sync.Mutex{}
+		combiner     = traceql.NewMetadataCombiner(maxResults, mostRecent)
+		metrics      = &tempopb.SearchMetrics{}
+		opts         = common.DefaultSearchOptions()
+		bytesMetric  = metricQueryInspectedBytes.WithLabelValues(i.tenantID)
 	)
 
 	search := func(ctx context.Context, blockMeta *backend.BlockMeta, b block) error {
@@ -275,6 +284,7 @@ func (i *instance) Search(ctx context.Context, req *tempopb.SearchRequest) (*tem
 		if resp.Metrics != nil {
 			metrics.InspectedTraces += resp.Metrics.InspectedTraces
 			metrics.InspectedBytes += resp.Metrics.InspectedBytes
+			bytesMetric.Add(float64(resp.Metrics.InspectedBytes))
 		}
 
 		for _, tr := range resp.Traces {
@@ -347,6 +357,11 @@ func (i *instance) SearchTagsV2(ctx context.Context, req *tempopb.SearchTagsRequ
 	maxBytestPerTags := i.overrides.MaxBytesPerTagValuesQuery(userID)
 	distinctValues := collector.NewScopedDistinctString(maxBytestPerTags, req.MaxTagsPerScope, req.StaleValuesThreshold)
 	mc := collector.NewMetricsCollector()
+	bytesMetric := metricQueryInspectedBytes.WithLabelValues(i.tenantID)
+	addBytes := func(n uint64) {
+		mc.Add(n)
+		bytesMetric.Add(float64(n))
+	}
 
 	engine := traceql.NewEngine()
 	conditionGroups, err := traceql.ExtractConditionGroups(req.Query, i.overrides.MaxConditionGroupsPerTagQuery())
@@ -370,7 +385,7 @@ func (i *instance) SearchTagsV2(ctx context.Context, req *tempopb.SearchTagsRequ
 		if len(conditionGroups) == 0 {
 			err := b.SearchTags(ctx, attributeScope, func(t string, scope traceql.AttributeScope) {
 				distinctValues.Collect(scope.String(), t)
-			}, mc.Add, common.DefaultSearchOptions())
+			}, addBytes, common.DefaultSearchOptions())
 
 			if err != nil && !errors.Is(err, util.ErrUnsupported) {
 				return err
@@ -381,7 +396,7 @@ func (i *instance) SearchTagsV2(ctx context.Context, req *tempopb.SearchTagsRequ
 
 		// otherwise use the filtered search
 		fetcher := traceql.NewTagNamesFetcherWrapper(func(ctx context.Context, req traceql.FetchTagsRequest, cb traceql.FetchTagsCallback) error {
-			return b.FetchTagNames(ctx, req, cb, mc.Add, common.DefaultSearchOptions())
+			return b.FetchTagNames(ctx, req, cb, addBytes, common.DefaultSearchOptions())
 		})
 
 		return engine.ExecuteTagNames(ctx, attributeScope, conditionGroups, func(tag string, scope traceql.AttributeScope) bool {
@@ -429,6 +444,11 @@ func (i *instance) SearchTagValues(ctx context.Context, req *tempopb.SearchTagVa
 	maxBytesPerTagValues := i.overrides.MaxBytesPerTagValuesQuery(userID)
 	distinctValues := collector.NewDistinctString(maxBytesPerTagValues, limit, staleValueThreshold)
 	mc := collector.NewMetricsCollector()
+	bytesMetric := metricQueryInspectedBytes.WithLabelValues(i.tenantID)
+	addBytes := func(n uint64) {
+		mc.Add(n)
+		bytesMetric.Add(float64(n))
+	}
 
 	var inspectedBlocks atomic.Int32
 	var maxBlocks int32
@@ -450,7 +470,7 @@ func (i *instance) SearchTagValues(ctx context.Context, req *tempopb.SearchTagVa
 			return errComplete
 		}
 
-		err := b.SearchTagValues(ctx, tagName, distinctValues.Collect, mc.Add, common.DefaultSearchOptions())
+		err := b.SearchTagValues(ctx, tagName, distinctValues.Collect, addBytes, common.DefaultSearchOptions())
 		if err != nil && !errors.Is(err, util.ErrUnsupported) {
 			return fmt.Errorf("unexpected error searching tag values (%s): %w", tagName, err)
 		}
@@ -486,6 +506,11 @@ func (i *instance) SearchTagValuesV2(ctx context.Context, req *tempopb.SearchTag
 	limit := i.overrides.MaxBytesPerTagValuesQuery(userID)
 	vCollector := collector.NewDistinctValue(limit, req.MaxTagValues, req.StaleValueThreshold, func(v tempopb.TagValue) int { return len(v.Type) + len(v.Value) })
 	mCollector := collector.NewMetricsCollector() // to collect bytesRead metric
+	bytesMetric := metricQueryInspectedBytes.WithLabelValues(i.tenantID)
+	addBytes := func(n uint64) {
+		mCollector.Add(n)
+		bytesMetric.Add(float64(n))
+	}
 
 	engine := traceql.NewEngine()
 
@@ -527,12 +552,12 @@ func (i *instance) SearchTagValuesV2(ctx context.Context, req *tempopb.SearchTag
 		}
 
 		if len(conditionGroups) == 0 {
-			return s.SearchTagValuesV2(ctx, tag, traceql.MakeCollectTagValueFunc(collect), mCollector.Add, common.DefaultSearchOptions())
+			return s.SearchTagValuesV2(ctx, tag, traceql.MakeCollectTagValueFunc(collect), addBytes, common.DefaultSearchOptions())
 		}
 
 		// Otherwise, use the filtered search
 		fetcher := traceql.NewTagValuesFetcherWrapper(func(ctx context.Context, req traceql.FetchTagValuesRequest, cb traceql.FetchTagValuesCallback) error {
-			return s.FetchTagValues(ctx, req, cb, mCollector.Add, common.DefaultSearchOptions())
+			return s.FetchTagValues(ctx, req, cb, addBytes, common.DefaultSearchOptions())
 		})
 
 		return engine.ExecuteTagValues(ctx, tag, conditionGroups, traceql.MakeCollectTagValueFunc(collect), fetcher, i.overrides.MaxConditionGroupsPerTagQuery())
@@ -572,7 +597,7 @@ func (i *instance) SearchTagValuesV2(ctx context.Context, req *tempopb.SearchTag
 			// we report the size of the cacheData as the amount of data was read to search this block.
 			// this can skew our metrics because this will be lower than the data read to search the block.
 			// we can remove this if this becomes an issue but leave it in for now to more accurate.
-			mCollector.Add(uint64(len(cacheData)))
+			addBytes(uint64(len(cacheData)))
 
 			for _, v := range resp.TagValues {
 				if vCollector.Collect(*v) {
@@ -634,11 +659,12 @@ func (i *instance) SearchTagValuesV2(ctx context.Context, req *tempopb.SearchTag
 
 func (i *instance) FindByTraceID(ctx context.Context, traceID []byte, allowPartialTrace bool) (*tempopb.TraceByIDResponse, error) {
 	var (
-		metricsMtx sync.Mutex
-		metrics    = tempopb.TraceByIDMetrics{}
-		maxBytes   = i.overrides.MaxBytesPerTrace(i.tenantID)
-		searchOpts = common.DefaultSearchOptions()
-		combiner   = trace.NewCombiner(maxBytes, allowPartialTrace)
+		metricsMtx  sync.Mutex
+		metrics     = tempopb.TraceByIDMetrics{}
+		maxBytes    = i.overrides.MaxBytesPerTrace(i.tenantID)
+		searchOpts  = common.DefaultSearchOptions()
+		combiner    = trace.NewCombiner(maxBytes, allowPartialTrace)
+		bytesMetric = metricQueryInspectedBytes.WithLabelValues(i.tenantID)
 	)
 
 	if !allowPartialTrace {
@@ -679,6 +705,7 @@ func (i *instance) FindByTraceID(ctx context.Context, traceID []byte, allowParti
 			defer metricsMtx.Unlock()
 
 			metrics.InspectedBytes += trace.Metrics.InspectedBytes
+			bytesMetric.Add(float64(trace.Metrics.InspectedBytes))
 		}
 		return nil
 	}
