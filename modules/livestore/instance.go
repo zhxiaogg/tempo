@@ -94,6 +94,14 @@ var (
 		Name:      "query_inspected_blocks_total",
 		Help:      "The total blocks inspected by queries per tenant.",
 	}, []string{"tenant"})
+	// metric-range queries cache per-block results in queryRangeCacheGet.
+	// Counts the subset of complete-block visits served from cache so dashboards
+	// can compute the hit rate as cache_hits / (inspected_blocks - head/wal share).
+	metricQueryBlockCacheHits = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "tempo_live_store",
+		Name:      "query_block_cache_hits_total",
+		Help:      "The number of complete-block visits served from the per-block query-range cache, per tenant.",
+	}, []string{"tenant"})
 	metricBackPressure = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "tempo",
 		Subsystem: "live_store",

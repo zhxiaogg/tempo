@@ -899,6 +899,7 @@ func (i *instance) queryRangeCompleteBlock(ctx context.Context, b *LocalBlock, r
 	span.SetAttributes(attribute.Bool("cached", cached != nil))
 
 	if cached != nil {
+		metricQueryBlockCacheHits.WithLabelValues(i.tenantID).Inc()
 		return cached.Series, nil
 	}
 
