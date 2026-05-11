@@ -843,15 +843,34 @@ func (i *instance) queryRangeWALBlock(ctx context.Context, b common.WALBlock, ev
 	))
 	defer span.End()
 
+	// Capture FetchSpansResponse.Bytes/FetchSpansOnlyResponse.Bytes callbacks so
+	// we can total the bytes inspected for this block after iteration completes.
+	var byteCallbacks []func() uint64
 	fetcher := traceql.NewSpansetFetcherWrapperBoth(
 		func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansResponse, error) {
-			return b.Fetch(ctx, req, common.DefaultSearchOptions())
+			resp, err := b.Fetch(ctx, req, common.DefaultSearchOptions())
+			if resp.Bytes != nil {
+				byteCallbacks = append(byteCallbacks, resp.Bytes)
+			}
+			return resp, err
 		},
 		func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansOnlyResponse, error) {
-			return b.FetchSpans(ctx, req, common.DefaultSearchOptions())
+			resp, err := b.FetchSpans(ctx, req, common.DefaultSearchOptions())
+			if resp.Bytes != nil {
+				byteCallbacks = append(byteCallbacks, resp.Bytes)
+			}
+			return resp, err
 		},
 	)
-	return eval.Do(ctx, fetcher, uint64(m.StartTime.UnixNano()), uint64(m.EndTime.UnixNano()), maxSeries)
+	err := eval.Do(ctx, fetcher, uint64(m.StartTime.UnixNano()), uint64(m.EndTime.UnixNano()), maxSeries)
+	var inspected uint64
+	for _, cb := range byteCallbacks {
+		inspected += cb()
+	}
+	if inspected > 0 {
+		metricQueryInspectedBytes.WithLabelValues(i.tenantID).Add(float64(inspected))
+	}
+	return err
 }
 
 func (i *instance) queryRangeCompleteBlock(ctx context.Context, b *LocalBlock, req tempopb.QueryRangeRequest, compileOpts []traceql.CompileOption) ([]*tempopb.TimeSeries, error) {
@@ -888,15 +907,32 @@ func (i *instance) queryRangeCompleteBlock(ctx context.Context, b *LocalBlock, r
 	if err != nil {
 		return nil, err
 	}
+	// Capture per-Fetch Bytes callbacks; total after iteration completes.
+	var byteCallbacks []func() uint64
 	f := traceql.NewSpansetFetcherWrapperBoth(
 		func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansResponse, error) {
-			return b.Fetch(ctx, req, common.DefaultSearchOptions())
+			resp, err := b.Fetch(ctx, req, common.DefaultSearchOptions())
+			if resp.Bytes != nil {
+				byteCallbacks = append(byteCallbacks, resp.Bytes)
+			}
+			return resp, err
 		},
 		func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansOnlyResponse, error) {
-			return b.FetchSpans(ctx, req, common.DefaultSearchOptions())
+			resp, err := b.FetchSpans(ctx, req, common.DefaultSearchOptions())
+			if resp.Bytes != nil {
+				byteCallbacks = append(byteCallbacks, resp.Bytes)
+			}
+			return resp, err
 		},
 	)
 	err = eval.Do(ctx, f, uint64(m.StartTime.UnixNano()), uint64(m.EndTime.UnixNano()), int(req.MaxSeries))
+	var inspected uint64
+	for _, cb := range byteCallbacks {
+		inspected += cb()
+	}
+	if inspected > 0 {
+		metricQueryInspectedBytes.WithLabelValues(i.tenantID).Add(float64(inspected))
+	}
 	if err != nil {
 		return nil, err
 	}
