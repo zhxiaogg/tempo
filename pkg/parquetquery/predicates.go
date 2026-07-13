@@ -560,20 +560,6 @@ func (p *InstrumentedPredicate) KeepRange(min, max pq.Value) bool {
 	return p.Pred.KeepRange(min, max)
 }
 
-// keepDictionary inspects all values using the callback and returns if any
-// matches were found.
-func keepDictionary(dict pq.Dictionary, keepValue func(pq.Value) bool) bool {
-	l := dict.Len()
-	for i := 0; i < l; i++ {
-		dictionaryEntry := dict.Index(int32(i))
-		if keepValue(dictionaryEntry) {
-			return true
-		}
-	}
-
-	return false
-}
-
 type SkipNilsPredicate struct{}
 
 var _ Predicate = (*SkipNilsPredicate)(nil)
