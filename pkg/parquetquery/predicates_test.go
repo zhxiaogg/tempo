@@ -21,6 +21,7 @@ type mockPredicate struct {
 	valCalled   bool
 	pageCalled  bool
 	chunkCalled bool
+	rangeCalled bool
 }
 
 type testDictString struct {
@@ -41,6 +42,23 @@ func (p *mockPredicate) String() string                          { return "mockP
 func (p *mockPredicate) KeepValue(parquet.Value) bool            { p.valCalled = true; return p.ret }
 func (p *mockPredicate) KeepPage(parquet.Page) bool              { p.pageCalled = true; return p.ret }
 func (p *mockPredicate) KeepColumnChunk(*ColumnChunkHelper) bool { p.chunkCalled = true; return p.ret }
+func (p *mockPredicate) KeepRange(parquet.Value, parquet.Value) bool {
+	p.rangeCalled = true
+	return p.ret
+}
+
+func TestKeepRange(t *testing.T) {
+	i64 := func(v int64) parquet.Value { return parquet.Int64Value(v) }
+	ba := func(s string) parquet.Value { return parquet.ByteArrayValue([]byte(s)) }
+
+	require.True(t, NewIntBetweenPredicate(5, 10).KeepRange(i64(0), i64(7)))
+	require.False(t, NewIntBetweenPredicate(5, 10).KeepRange(i64(0), i64(4)))
+	require.True(t, NewByteInPredicate([][]byte{[]byte("m")}).KeepRange(ba("a"), ba("z")))
+	require.False(t, NewByteInPredicate([][]byte{[]byte("zz")}).KeepRange(ba("a"), ba("m")))
+	require.True(t, NewSubstringPredicate("x").KeepRange(ba("a"), ba("b"))) // unbounded → true
+	require.False(t, NilValuePredicate{}.KeepRange(ba("a"), ba("z")))       // never matches a present value
+	require.True(t, NewSkipNilsPredicate().KeepRange(ba("a"), ba("z")))
+}
 
 type predicateTestCase struct {
 	testName   string

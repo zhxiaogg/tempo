@@ -97,6 +97,16 @@ func (p {{ $structName }}) KeepValue(v pq.Value) bool {
 	vv := v.{{ $pred.ParquetFunc }}
 	return {{ .CompareCond }}
 }
+
+func (p {{ $structName }}) KeepRange(minV, maxV pq.Value) bool {
+	{{- if gt (.RangeCond | strlen) 0 }}
+	{{ if $minInRange }}min := minV.{{ $pred.ParquetFunc }}{{end}}
+	{{ if $maxInRange }}max := maxV.{{ $pred.ParquetFunc }}{{end}}
+	return {{ .RangeCond }}
+	{{- else }}
+	return true
+	{{- end }}
+}
 {{- end }}
 {{- end }}
 
@@ -169,6 +179,21 @@ func (p {{ $structName }}) KeepValue(v pq.Value) bool {
 	return false
 }
 
+func (p {{ $structName }}) KeepRange(minV, maxV pq.Value) bool {
+	{{- if or (eq $pred.Name "Int") (eq $pred.Name "Float") }}
+	min := minV.{{ $pred.ParquetFunc }}
+	max := maxV.{{ $pred.ParquetFunc }}
+	for _, v := range p.values {
+		if min <= v && v <= max {
+			return true
+		}
+	}
+	return false
+	{{- else }}
+	return true
+	{{- end }}
+}
+
 {{- $structName := printf "%sNotInPredicate" $pred.Name }}
 var _ Predicate = (*{{ $structName }})(nil)
 
@@ -207,6 +232,8 @@ func (p {{ $structName }}) KeepValue(v pq.Value) bool {
 	}
 	return true
 }
+
+func (p {{ $structName }}) KeepRange(pq.Value, pq.Value) bool { return true }
 {{- end }}
 {{- end }}
 `

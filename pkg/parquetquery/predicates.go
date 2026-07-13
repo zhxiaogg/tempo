@@ -18,6 +18,8 @@ type Predicate interface {
 	KeepColumnChunk(*ColumnChunkHelper) bool
 	KeepPage(page pq.Page) bool
 	KeepValue(pq.Value) bool
+	// KeepRange reports whether any value in the inclusive [min,max] range could match.
+	KeepRange(min, max pq.Value) bool
 }
 
 // NewStringEqualPredicate is just an alias for the equivalent byte predicate
@@ -114,6 +116,16 @@ func (p *ByteInPredicate) KeepPage(pq.Page) bool {
 	return true
 }
 
+func (p *ByteInPredicate) KeepRange(min, max pq.Value) bool {
+	lo, hi := min.ByteArray(), max.ByteArray()
+	for _, s := range p.values {
+		if bytes.Compare(lo, s) <= 0 && bytes.Compare(hi, s) >= 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // ByteNotInPredicate checks for any of the given strings. Case-sensitive exact byte matching
 type ByteNotInPredicate struct {
 	values    [][]byte
@@ -179,6 +191,8 @@ func (p *ByteNotInPredicate) KeepPage(pq.Page) bool {
 	return true
 }
 
+func (p *ByteNotInPredicate) KeepRange(pq.Value, pq.Value) bool { return true }
+
 type regexPredicate struct {
 	matcher *regexp.Regexp
 }
@@ -241,6 +255,8 @@ func (p *regexPredicate) KeepPage(pq.Page) bool {
 	return true
 }
 
+func (p *regexPredicate) KeepRange(pq.Value, pq.Value) bool { return true }
+
 type SubstringPredicate struct {
 	substring []byte
 	matches   map[string]bool
@@ -290,6 +306,8 @@ func (p *SubstringPredicate) KeepPage(pq.Page) bool {
 	return true
 }
 
+func (p *SubstringPredicate) KeepRange(pq.Value, pq.Value) bool { return true }
+
 // IntBetweenPredicate checks for int between the bounds [min,max] inclusive
 type IntBetweenPredicate struct {
 	min, max int64
@@ -331,6 +349,10 @@ func (p *IntBetweenPredicate) KeepPage(page pq.Page) bool {
 		return p.max >= minVal.Int64() && p.min <= maxVal.Int64()
 	}
 	return true
+}
+
+func (p *IntBetweenPredicate) KeepRange(min, max pq.Value) bool {
+	return p.max >= min.Int64() && p.min <= max.Int64()
 }
 
 // GenericPredicate with callbacks to evaluate data of type T
@@ -392,6 +414,13 @@ func (p *GenericPredicate[T]) KeepPage(page pq.Page) bool {
 
 func (p *GenericPredicate[T]) KeepValue(v pq.Value) bool {
 	return p.Fn(p.Extract(v))
+}
+
+func (p *GenericPredicate[T]) KeepRange(min, max pq.Value) bool {
+	if p.RangeFn == nil {
+		return true
+	}
+	return p.RangeFn(p.Extract(min), p.Extract(max))
 }
 
 type OrPredicate struct {
@@ -462,6 +491,16 @@ func (p *OrPredicate) KeepValue(v pq.Value) bool {
 	return false
 }
 
+func (p *OrPredicate) KeepRange(min, max pq.Value) bool {
+	for _, sub := range p.preds {
+		if sub == nil || sub.KeepRange(min, max) {
+			// Nil means all values are returned
+			return true
+		}
+	}
+	return false
+}
+
 type InstrumentedPredicate struct {
 	Pred                  Predicate // Optional, if missing then just keeps metrics with no filtering
 	InspectedColumnChunks int64
@@ -514,6 +553,13 @@ func (p *InstrumentedPredicate) KeepValue(v pq.Value) bool {
 	return false
 }
 
+func (p *InstrumentedPredicate) KeepRange(min, max pq.Value) bool {
+	if p.Pred == nil {
+		return true
+	}
+	return p.Pred.KeepRange(min, max)
+}
+
 // keepDictionary inspects all values using the callback and returns if any
 // matches were found.
 func keepDictionary(dict pq.Dictionary, keepValue func(pq.Value) bool) bool {
@@ -552,6 +598,8 @@ func (p *SkipNilsPredicate) KeepValue(v pq.Value) bool {
 	return !v.IsNull()
 }
 
+func (p *SkipNilsPredicate) KeepRange(pq.Value, pq.Value) bool { return true }
+
 type CallbackPredicate struct {
 	cb func() bool
 }
@@ -569,6 +617,8 @@ func (m *CallbackPredicate) KeepColumnChunk(*ColumnChunkHelper) bool { return m.
 func (m *CallbackPredicate) KeepPage(pq.Page) bool { return m.cb() }
 
 func (m *CallbackPredicate) KeepValue(pq.Value) bool { return m.cb() }
+
+func (m *CallbackPredicate) KeepRange(pq.Value, pq.Value) bool { return m.cb() }
 
 var _ Predicate = (*NilValuePredicate)(nil)
 
@@ -604,6 +654,8 @@ func (p NilValuePredicate) KeepValue(v pq.Value) bool {
 	return v.IsNull()
 }
 
+func (p NilValuePredicate) KeepRange(pq.Value, pq.Value) bool { return false }
+
 type IncludeNilStringEqualPredicate struct {
 	value []byte
 }
@@ -628,3 +680,5 @@ func (p IncludeNilStringEqualPredicate) KeepValue(v pq.Value) bool {
 	vv := v.ByteArray()
 	return bytes.Equal(vv, p.value)
 }
+
+func (p IncludeNilStringEqualPredicate) KeepRange(pq.Value, pq.Value) bool { return true }

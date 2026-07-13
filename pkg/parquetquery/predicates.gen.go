@@ -70,6 +70,12 @@ func (p IntEqualPredicate) KeepValue(v pq.Value) bool {
 	return vv == p.value
 }
 
+func (p IntEqualPredicate) KeepRange(minV, maxV pq.Value) bool {
+	min := minV.Int64()
+	max := maxV.Int64()
+	return min <= p.value && p.value <= max
+}
+
 var _ Predicate = (*IntNotEqualPredicate)(nil)
 
 type IntNotEqualPredicate struct {
@@ -128,6 +134,12 @@ func (p IntNotEqualPredicate) KeepValue(v pq.Value) bool {
 	}
 	vv := v.Int64()
 	return vv != p.value
+}
+
+func (p IntNotEqualPredicate) KeepRange(minV, maxV pq.Value) bool {
+	min := minV.Int64()
+	max := maxV.Int64()
+	return min != p.value || p.value != max
 }
 
 var _ Predicate = (*IntGreaterPredicate)(nil)
@@ -189,6 +201,12 @@ func (p IntGreaterPredicate) KeepValue(v pq.Value) bool {
 	return vv > p.value
 }
 
+func (p IntGreaterPredicate) KeepRange(minV, maxV pq.Value) bool {
+
+	max := maxV.Int64()
+	return max > p.value
+}
+
 var _ Predicate = (*IntGreaterEqualPredicate)(nil)
 
 type IntGreaterEqualPredicate struct {
@@ -246,6 +264,12 @@ func (p IntGreaterEqualPredicate) KeepValue(v pq.Value) bool {
 	}
 	vv := v.Int64()
 	return vv >= p.value
+}
+
+func (p IntGreaterEqualPredicate) KeepRange(minV, maxV pq.Value) bool {
+
+	max := maxV.Int64()
+	return max >= p.value
 }
 
 var _ Predicate = (*IntLessPredicate)(nil)
@@ -306,6 +330,12 @@ func (p IntLessPredicate) KeepValue(v pq.Value) bool {
 	return vv < p.value
 }
 
+func (p IntLessPredicate) KeepRange(minV, maxV pq.Value) bool {
+	min := minV.Int64()
+
+	return min < p.value
+}
+
 var _ Predicate = (*IntLessEqualPredicate)(nil)
 
 type IntLessEqualPredicate struct {
@@ -362,6 +392,12 @@ func (p IntLessEqualPredicate) KeepValue(v pq.Value) bool {
 	}
 	vv := v.Int64()
 	return vv <= p.value
+}
+
+func (p IntLessEqualPredicate) KeepRange(minV, maxV pq.Value) bool {
+	min := minV.Int64()
+
+	return min <= p.value
 }
 
 var _ Predicate = (*FloatEqualPredicate)(nil)
@@ -424,6 +460,12 @@ func (p FloatEqualPredicate) KeepValue(v pq.Value) bool {
 	return vv == p.value
 }
 
+func (p FloatEqualPredicate) KeepRange(minV, maxV pq.Value) bool {
+	min := minV.Double()
+	max := maxV.Double()
+	return min <= p.value && p.value <= max
+}
+
 var _ Predicate = (*FloatNotEqualPredicate)(nil)
 
 type FloatNotEqualPredicate struct {
@@ -482,6 +524,12 @@ func (p FloatNotEqualPredicate) KeepValue(v pq.Value) bool {
 	}
 	vv := v.Double()
 	return vv != p.value
+}
+
+func (p FloatNotEqualPredicate) KeepRange(minV, maxV pq.Value) bool {
+	min := minV.Double()
+	max := maxV.Double()
+	return min != p.value || p.value != max
 }
 
 var _ Predicate = (*FloatGreaterPredicate)(nil)
@@ -543,6 +591,12 @@ func (p FloatGreaterPredicate) KeepValue(v pq.Value) bool {
 	return vv > p.value
 }
 
+func (p FloatGreaterPredicate) KeepRange(minV, maxV pq.Value) bool {
+
+	max := maxV.Double()
+	return max > p.value
+}
+
 var _ Predicate = (*FloatGreaterEqualPredicate)(nil)
 
 type FloatGreaterEqualPredicate struct {
@@ -600,6 +654,12 @@ func (p FloatGreaterEqualPredicate) KeepValue(v pq.Value) bool {
 	}
 	vv := v.Double()
 	return vv >= p.value
+}
+
+func (p FloatGreaterEqualPredicate) KeepRange(minV, maxV pq.Value) bool {
+
+	max := maxV.Double()
+	return max >= p.value
 }
 
 var _ Predicate = (*FloatLessPredicate)(nil)
@@ -660,6 +720,12 @@ func (p FloatLessPredicate) KeepValue(v pq.Value) bool {
 	return vv < p.value
 }
 
+func (p FloatLessPredicate) KeepRange(minV, maxV pq.Value) bool {
+	min := minV.Double()
+
+	return min < p.value
+}
+
 var _ Predicate = (*FloatLessEqualPredicate)(nil)
 
 type FloatLessEqualPredicate struct {
@@ -718,6 +784,12 @@ func (p FloatLessEqualPredicate) KeepValue(v pq.Value) bool {
 	return vv <= p.value
 }
 
+func (p FloatLessEqualPredicate) KeepRange(minV, maxV pq.Value) bool {
+	min := minV.Double()
+
+	return min <= p.value
+}
+
 var _ Predicate = (*BoolEqualPredicate)(nil)
 
 type BoolEqualPredicate struct {
@@ -753,6 +825,10 @@ func (p BoolEqualPredicate) KeepValue(v pq.Value) bool {
 	return vv == p.value
 }
 
+func (p BoolEqualPredicate) KeepRange(minV, maxV pq.Value) bool {
+	return true
+}
+
 var _ Predicate = (*BoolNotEqualPredicate)(nil)
 
 type BoolNotEqualPredicate struct {
@@ -786,6 +862,10 @@ func (p BoolNotEqualPredicate) KeepValue(v pq.Value) bool {
 	}
 	vv := v.Boolean()
 	return vv != p.value
+}
+
+func (p BoolNotEqualPredicate) KeepRange(minV, maxV pq.Value) bool {
+	return true
 }
 
 var _ Predicate = (*StringGreaterPredicate)(nil)
@@ -847,6 +927,12 @@ func (p StringGreaterPredicate) KeepValue(v pq.Value) bool {
 	return bytes.Compare(vv, p.value) > 0
 }
 
+func (p StringGreaterPredicate) KeepRange(minV, maxV pq.Value) bool {
+
+	max := maxV.ByteArray()
+	return len(max) == 0 || bytes.Compare(max, p.value) > 0
+}
+
 var _ Predicate = (*StringGreaterEqualPredicate)(nil)
 
 type StringGreaterEqualPredicate struct {
@@ -904,6 +990,12 @@ func (p StringGreaterEqualPredicate) KeepValue(v pq.Value) bool {
 	}
 	vv := v.ByteArray()
 	return bytes.Compare(vv, p.value) >= 0
+}
+
+func (p StringGreaterEqualPredicate) KeepRange(minV, maxV pq.Value) bool {
+
+	max := maxV.ByteArray()
+	return len(max) == 0 || bytes.Compare(max, p.value) >= 0
 }
 
 var _ Predicate = (*StringLessPredicate)(nil)
@@ -964,6 +1056,12 @@ func (p StringLessPredicate) KeepValue(v pq.Value) bool {
 	return bytes.Compare(vv, p.value) < 0
 }
 
+func (p StringLessPredicate) KeepRange(minV, maxV pq.Value) bool {
+	min := minV.ByteArray()
+
+	return len(min) == 0 || bytes.Compare(min, p.value) < 0
+}
+
 var _ Predicate = (*StringLessEqualPredicate)(nil)
 
 type StringLessEqualPredicate struct {
@@ -1020,6 +1118,12 @@ func (p StringLessEqualPredicate) KeepValue(v pq.Value) bool {
 	}
 	vv := v.ByteArray()
 	return bytes.Compare(vv, p.value) <= 0
+}
+
+func (p StringLessEqualPredicate) KeepRange(minV, maxV pq.Value) bool {
+	min := minV.ByteArray()
+
+	return len(min) == 0 || bytes.Compare(min, p.value) <= 0
 }
 
 var _ Predicate = (*ByteEqualPredicate)(nil)
@@ -1082,6 +1186,12 @@ func (p ByteEqualPredicate) KeepValue(v pq.Value) bool {
 	return bytes.Equal(vv, p.value)
 }
 
+func (p ByteEqualPredicate) KeepRange(minV, maxV pq.Value) bool {
+	min := minV.ByteArray()
+	max := maxV.ByteArray()
+	return (len(min) == 0 && len(max) == 0) || (bytes.Compare(p.value, min) >= 0 && bytes.Compare(p.value, max) <= 0)
+}
+
 var _ Predicate = (*ByteNotEqualPredicate)(nil)
 
 type ByteNotEqualPredicate struct {
@@ -1140,6 +1250,12 @@ func (p ByteNotEqualPredicate) KeepValue(v pq.Value) bool {
 	}
 	vv := v.ByteArray()
 	return !bytes.Equal(vv, p.value)
+}
+
+func (p ByteNotEqualPredicate) KeepRange(minV, maxV pq.Value) bool {
+	min := minV.ByteArray()
+	max := maxV.ByteArray()
+	return (len(min) == 0 && len(max) == 0) || (!bytes.Equal(min, p.value) || !bytes.Equal(p.value, max))
 }
 
 var _ Predicate = (*IntInPredicate)(nil)
@@ -1202,6 +1318,17 @@ func (p IntInPredicate) KeepValue(v pq.Value) bool {
 	return false
 }
 
+func (p IntInPredicate) KeepRange(minV, maxV pq.Value) bool {
+	min := minV.Int64()
+	max := maxV.Int64()
+	for _, v := range p.values {
+		if min <= v && v <= max {
+			return true
+		}
+	}
+	return false
+}
+
 var _ Predicate = (*IntNotInPredicate)(nil)
 
 type IntNotInPredicate struct {
@@ -1239,6 +1366,8 @@ func (p IntNotInPredicate) KeepValue(v pq.Value) bool {
 	}
 	return true
 }
+
+func (p IntNotInPredicate) KeepRange(pq.Value, pq.Value) bool { return true }
 
 var _ Predicate = (*FloatInPredicate)(nil)
 
@@ -1300,6 +1429,17 @@ func (p FloatInPredicate) KeepValue(v pq.Value) bool {
 	return false
 }
 
+func (p FloatInPredicate) KeepRange(minV, maxV pq.Value) bool {
+	min := minV.Double()
+	max := maxV.Double()
+	for _, v := range p.values {
+		if min <= v && v <= max {
+			return true
+		}
+	}
+	return false
+}
+
 var _ Predicate = (*FloatNotInPredicate)(nil)
 
 type FloatNotInPredicate struct {
@@ -1338,6 +1478,8 @@ func (p FloatNotInPredicate) KeepValue(v pq.Value) bool {
 	return true
 }
 
+func (p FloatNotInPredicate) KeepRange(pq.Value, pq.Value) bool { return true }
+
 var _ Predicate = (*BoolInPredicate)(nil)
 
 type BoolInPredicate struct {
@@ -1372,6 +1514,10 @@ func (p BoolInPredicate) KeepValue(v pq.Value) bool {
 		}
 	}
 	return false
+}
+
+func (p BoolInPredicate) KeepRange(minV, maxV pq.Value) bool {
+	return true
 }
 
 var _ Predicate = (*BoolNotInPredicate)(nil)
@@ -1411,3 +1557,5 @@ func (p BoolNotInPredicate) KeepValue(v pq.Value) bool {
 	}
 	return true
 }
+
+func (p BoolNotInPredicate) KeepRange(pq.Value, pq.Value) bool { return true }
