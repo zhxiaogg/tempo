@@ -402,6 +402,28 @@ func SyncIteratorOptPredicate(p Predicate) SyncIteratorOpt {
 	}
 }
 
+// Sampler decides which matching values to keep during iteration, thinning the
+// stream so downstream work scales with a sample rather than the full match set.
+// It is intentionally narrower than traceql.Sampler (which any traceql.Sampler
+// satisfies) so this package takes no dependency on traceql.
+type Sampler interface {
+	// Expect is called once per accepted page with the page's value count, so the
+	// sampler knows the population it is sampling from.
+	Expect(count uint64)
+	// Sample is called for each value that passes the predicate. It returns true to
+	// keep the value and false to drop it.
+	Sample() bool
+}
+
+// SyncIteratorOptSampler applies a sampler to values that pass the predicate. Only
+// sampled values are returned; every row still advances the row number. Used by
+// TraceQL metrics sampling, replacing the former samplingPredicate wrapper.
+func SyncIteratorOptSampler(s Sampler) SyncIteratorOpt {
+	return func(i *SyncIterator) {
+		i.sampler = s
+	}
+}
+
 // SyncIteratorOptColumnName sets the column name for the iterator.
 // This is used for tracing and debugging only. All work is done
 // using the column index which is a required parameter on creation.
@@ -451,6 +473,7 @@ type SyncIterator struct {
 	rgsMax     []RowNumber // Exclusive, row number of next one past the row group
 	readSize   int
 	filter     Predicate
+	sampler    Sampler
 
 	// Status
 	span            trace.Span
@@ -874,6 +897,13 @@ func (c *SyncIterator) next() (RowNumber, *pq.Value, error) {
 				continue
 			}
 
+			// Sample among the values that passed the predicate (formerly
+			// samplingPredicate.KeepValue). Dropped values still advanced the row
+			// number above, so accounting stays correct.
+			if c.sampler != nil && !c.sampler.Sample() {
+				continue
+			}
+
 			return c.curr, v, nil
 		}
 	}
@@ -918,6 +948,12 @@ func (c *SyncIterator) setPage(pg pq.Page) {
 		c.currPageMin = c.curr
 		c.currPageMax = rn
 		c.currValues = pg.Values()
+
+		// Tell the sampler how many values this accepted page holds so it can
+		// account for the population it samples from (formerly samplingPredicate.KeepPage).
+		if c.sampler != nil {
+			c.sampler.Expect(uint64(pg.NumValues()))
+		}
 	}
 }
 

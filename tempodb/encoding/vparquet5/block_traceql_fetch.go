@@ -782,11 +782,13 @@ func createSpanIterators(
 	// iterator for other cases.
 	if needDriver {
 		if len(required) == 0 {
-			var pred parquetquery.Predicate
+			// Sampling is applied by the iterator, not a wrapper predicate: the sampler
+			// thins the values this driver column emits (formerly newSamplingPredicate).
+			var extra []parquetquery.SyncIteratorOpt
 			if sampler != nil {
-				pred = newSamplingPredicate(sampler, nil)
+				extra = append(extra, parquetquery.SyncIteratorOptSampler(sampler))
 			}
-			driver = newVirtualRowNumberIterator(makeIter(columnPathScopeSpansSpanCount, pred, "spanCount"), DefinitionLevelResourceSpansILSSpan)
+			driver = newVirtualRowNumberIterator(makeIter(columnPathScopeSpansSpanCount, nil, "spanCount", extra...), DefinitionLevelResourceSpansILSSpan)
 		} else {
 			// use the first required iterator as the driver
 			driver = required[0]
