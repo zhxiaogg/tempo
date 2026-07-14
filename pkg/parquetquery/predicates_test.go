@@ -17,11 +17,7 @@ type testInt struct {
 }
 
 type mockPredicate struct {
-	ret         bool
-	valCalled   bool
-	pageCalled  bool
-	chunkCalled bool
-	rangeCalled bool
+	ret bool
 }
 
 type testDictString struct {
@@ -30,22 +26,9 @@ type testDictString struct {
 
 var _ Predicate = (*mockPredicate)(nil)
 
-func newAlwaysTruePredicate() *mockPredicate {
-	return &mockPredicate{ret: true}
-}
-
-func newAlwaysFalsePredicate() *mockPredicate {
-	return &mockPredicate{ret: false}
-}
-
-func (p *mockPredicate) String() string                          { return "mockPredicate{}" }
-func (p *mockPredicate) KeepValue(parquet.Value) bool            { p.valCalled = true; return p.ret }
-func (p *mockPredicate) KeepPage(parquet.Page) bool              { p.pageCalled = true; return p.ret }
-func (p *mockPredicate) KeepColumnChunk(*ColumnChunkHelper) bool { p.chunkCalled = true; return p.ret }
-func (p *mockPredicate) KeepRange(parquet.Value, parquet.Value) bool {
-	p.rangeCalled = true
-	return p.ret
-}
+func (p *mockPredicate) String() string                             { return "mockPredicate{}" }
+func (p *mockPredicate) KeepValue(parquet.Value) bool               { return p.ret }
+func (p *mockPredicate) KeepRange(parquet.Value, parquet.Value) bool { return p.ret }
 
 func TestKeepRange(t *testing.T) {
 	i64 := func(v int64) parquet.Value { return parquet.Int64Value(v) }
@@ -301,57 +284,6 @@ func TestNewRegexNotInPredicate(t *testing.T) {
 		t.Run(tC.testName, func(t *testing.T) {
 			testPredicate(t, tC)
 		})
-	}
-}
-
-// TestOrPredicateCallsKeepColumnChunk ensures that the OrPredicate calls
-// KeepColumnChunk on all of its children. This is important because the
-// Dictionary predicates rely on KeepColumnChunk always being called at the
-// beginning of a row group to reset their page.
-func TestOrPredicateCallsKeepColumnChunk(t *testing.T) {
-	tcs := []struct {
-		preds []*mockPredicate
-	}{
-		{},
-		{
-			preds: []*mockPredicate{
-				newAlwaysTruePredicate(),
-			},
-		},
-		{
-			preds: []*mockPredicate{
-				newAlwaysFalsePredicate(),
-			},
-		},
-		{
-			preds: []*mockPredicate{
-				newAlwaysFalsePredicate(),
-				newAlwaysTruePredicate(),
-			},
-		},
-		{
-			preds: []*mockPredicate{
-				newAlwaysTruePredicate(),
-				newAlwaysFalsePredicate(),
-			},
-		},
-	}
-
-	for _, tc := range tcs {
-		preds := make([]Predicate, 0, len(tc.preds)+1)
-		for _, pred := range tc.preds {
-			preds = append(preds, pred)
-		}
-
-		recordPred := &mockPredicate{}
-		preds = append(preds, recordPred)
-
-		p := NewOrPredicate(preds...)
-		p.KeepColumnChunk(nil)
-
-		for _, pred := range preds {
-			require.True(t, pred.(*mockPredicate).chunkCalled)
-		}
 	}
 }
 

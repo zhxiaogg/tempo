@@ -47,49 +47,6 @@ func (p {{ $structName }}) String() string {
 	return fmt.Sprintf("{{ $structName }}{{"{"}}{{ $pred.FormatModifier }}{{"}"}}", p.value)
 }
 
-func (p {{ $structName }}) KeepColumnChunk(c *ColumnChunkHelper) bool {
-	if d := c.Dictionary(); d != nil {
-		return keepDictionary(d, p.KeepValue)
-	}
-
-	{{- if gt (.RangeCond | strlen) 0 }}
-	ci, err := c.ColumnIndex()
-	if err == nil && ci != nil {
-		for i := 0; i < ci.NumPages(); i++ {
-			if ci.NullPage(i) {
-				// This page only contains nulls so the min/max metadata is not
-				// recorded and this page does not contain any values.
-				continue
-			}
-
-			{{ if $minInRange }}min := ci.MinValue(i).{{ $pred.ParquetFunc }}{{end}}
-			{{ if $maxInRange }}max := ci.MaxValue(i).{{ $pred.ParquetFunc }}{{end}}
-
-			if {{ .RangeCond }} {
-				return true
-			}
-		}
-		return false
-	}
-	{{- end }}
-
-	return true
-}
-
-func (p {{ $structName }}) KeepPage(page pq.Page) bool {
-	{{- if gt (.RangeCond | strlen) 0 }}
-	{{ if $minInRange }}minV{{else}}_{{end}}, {{ if $maxInRange }}maxV{{else}}_{{end}}, ok := page.Bounds()
-	if ok {
-		{{ if $minInRange }}min := minV.{{ $pred.ParquetFunc }}{{end}}
-		{{ if $maxInRange }}max := maxV.{{ $pred.ParquetFunc }}{{end}}
-
-		return {{ .RangeCond }}
-	}
-	{{- end }}
-
-	return true
-}
-
 func (p {{ $structName }}) KeepValue(v pq.Value) bool {
 	if v.IsNull() {
 		return false
@@ -126,45 +83,6 @@ func New{{ $structName }}(vals []{{$pred.Type}}) {{ $structName }} {
 }
 
 func (p {{ $structName }}) String() string { return fmt.Sprintf("{{ $structName }}{%v}", p.values) }
-
-func (p {{ $structName }}) KeepColumnChunk(c *ColumnChunkHelper) bool {
-	if d := c.Dictionary(); d != nil {
-		return keepDictionary(d, p.KeepValue)
-	}
-	{{- if or (eq $pred.Name "Int") (eq $pred.Name "Float") }}
-	ci, err := c.ColumnIndex()
-	if err == nil && ci != nil {
-		for i := 0; i < ci.NumPages(); i++ {
-			min := ci.MinValue(i).{{ $pred.ParquetFunc }}
-			max := ci.MaxValue(i).{{ $pred.ParquetFunc }}
-			for _, v := range p.values {
-				if min <= v && v <= max {
-					return true
-				}
-			}
-		}
-		return false
-	}
-	{{- end }}
-	return true
-}
-
-func (p {{ $structName }}) KeepPage(page pq.Page) bool {
-	{{- if or (eq $pred.Name "Int") (eq $pred.Name "Float") }}
-	minV, maxV, ok := page.Bounds()
-	if ok {
-		min := minV.{{ $pred.ParquetFunc }}
-		max := maxV.{{ $pred.ParquetFunc }}
-		for _, v := range p.values {
-			if min <= v && v <= max {
-				return true
-			}
-		}
-		return false
-	}
-	{{- end }}
-	return true
-}
 
 func (p {{ $structName }}) KeepValue(v pq.Value) bool {
 	if v.IsNull() {
@@ -207,17 +125,6 @@ func New{{ $structName }}(vals []{{$pred.Type}}) {{ $structName }} {
 
 func (p {{ $structName }}) String() string {
 	return fmt.Sprintf("{{ $structName }}{%v}", p.values)
-}
-
-func (p {{ $structName }}) KeepColumnChunk(c *ColumnChunkHelper) bool {
-	if d := c.Dictionary(); d != nil {
-		return keepDictionary(d, p.KeepValue)
-	}
-	return true
-}
-
-func (p {{ $structName }}) KeepPage(page pq.Page) bool { 
-	return true
 }
 
 func (p {{ $structName }}) KeepValue(v pq.Value) bool {
