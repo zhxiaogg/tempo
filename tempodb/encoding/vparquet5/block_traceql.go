@@ -2678,8 +2678,9 @@ func createTraceIterator(makeIter makeIterFn, resourceIter parquetquery.Iterator
 		// TODO: We might be able to do this without loading a real column, by using
 		// the fact that every trace is a top-level row and there are no gaps. We could
 		// inspect the number of rows in the given row groups and generate virtual row numbers.
-		pred := newSamplingPredicate(sampler, nil)
-		i := makeIter(columnPathRootServiceName, pred, "")
+		// Trace-level sampling: the sampler thins the traces this driver column
+		// emits (formerly newSamplingPredicate on RootServiceName).
+		i := makeIter(columnPathRootServiceName, nil, "", parquetquery.SyncIteratorOptSampler(sampler))
 		required = append([]parquetquery.Iterator{i}, required...)
 	}
 
