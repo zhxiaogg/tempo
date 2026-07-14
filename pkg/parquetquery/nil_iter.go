@@ -20,6 +20,10 @@ var _ Iterator = (*NilSyncIterator)(nil)
 func NewNilSyncIterator(ctx context.Context, rgs []pq.RowGroup, column int, opts ...SyncIteratorOpt) *NilSyncIterator {
 	// Create the sync iterator
 	syncIterator := NewSyncIterator(ctx, rgs, column, opts...)
+	// A nil iterator detects the ABSENCE of a matching value per scope, so it must
+	// scan every chunk/page rather than skip on predicate match — including via the
+	// shared seek path (seekRowGroup / seekPages) reused by SeekTo below.
+	syncIterator.neverSkip = true
 
 	i := &NilSyncIterator{
 		SyncIterator:          *syncIterator,
@@ -133,12 +137,11 @@ func (c *NilSyncIterator) next() (RowNumber, *pq.Value, error) {
 				return EmptyRowNumber(), nil, nil
 			}
 
+			// A nil iterator detects the ABSENCE of a matching value per scope, so it
+			// must scan every chunk/page — predicate match-based skipping would drop the
+			// very scopes it needs to emit as nil. (All nil-iterator predicates returned
+			// true from KeepColumnChunk/KeepPage before this refactor.)
 			cc := &ColumnChunkHelper{ColumnChunk: rg.ColumnChunks()[c.column]}
-			if c.filter != nil && !c.filter.KeepColumnChunk(cc) {
-				cc.Close()
-				continue
-			}
-
 			c.setRowGroup(rg, minRN, maxRN, cc)
 		}
 
@@ -152,12 +155,7 @@ func (c *NilSyncIterator) next() (RowNumber, *pq.Value, error) {
 				c.closeCurrRowGroup()
 				continue
 			}
-			if c.filter != nil && !c.filter.KeepPage(pg) {
-				// This page filtered out
-				c.curr.Skip(pg.NumRows())
-				pq.Release(pg)
-				continue
-			}
+			// No page skipping: see the note in the row-group loop above.
 			c.setPage(pg)
 		}
 

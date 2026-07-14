@@ -402,6 +402,28 @@ func SyncIteratorOptPredicate(p Predicate) SyncIteratorOpt {
 	}
 }
 
+// Sampler decides which matching values to keep during iteration, thinning the
+// stream so downstream work scales with a sample rather than the full match set.
+// It is intentionally narrower than traceql.Sampler (which any traceql.Sampler
+// satisfies) so this package takes no dependency on traceql.
+type Sampler interface {
+	// Expect is called once per accepted page with the page's value count, so the
+	// sampler knows the population it is sampling from.
+	Expect(count uint64)
+	// Sample is called for each value that passes the predicate. It returns true to
+	// keep the value and false to drop it.
+	Sample() bool
+}
+
+// SyncIteratorOptSampler applies a sampler to values that pass the predicate. Only
+// sampled values are returned; every row still advances the row number. Used by
+// TraceQL metrics sampling, replacing the former samplingPredicate wrapper.
+func SyncIteratorOptSampler(s Sampler) SyncIteratorOpt {
+	return func(i *SyncIterator) {
+		i.sampler = s
+	}
+}
+
 // SyncIteratorOptColumnName sets the column name for the iterator.
 // This is used for tracing and debugging only. All work is done
 // using the column index which is a required parameter on creation.
@@ -451,6 +473,17 @@ type SyncIterator struct {
 	rgsMax     []RowNumber // Exclusive, row number of next one past the row group
 	readSize   int
 	filter     Predicate
+	// pred is the predicate used for chunk/page skipping. It is filter unwrapped of
+	// any InstrumentedPredicate so the helpers' dictionary/null KeepValue calls do not
+	// inflate the wrapper's value counters; those chunk/page counts go through stats.
+	pred    Predicate
+	stats   *predicateStats
+	sampler Sampler
+	// neverSkip disables predicate-based chunk/page skipping. Set for the nil
+	// iterator, which detects the ABSENCE of a matching value per scope and so must
+	// scan every chunk/page — including via the shared seek path (seekRowGroup /
+	// seekPages), which NilSyncIterator.SeekTo reuses.
+	neverSkip bool
 
 	// Status
 	span            trace.Span
@@ -512,6 +545,15 @@ func NewSyncIterator(ctx context.Context, rgs []pq.RowGroup, column int, opts ..
 	// Apply options
 	for _, opt := range opts {
 		opt(i)
+	}
+
+	// Resolve the predicate used for chunk/page skipping. Unwrap InstrumentedPredicate
+	// so the helpers count chunk/page decisions via stats and leave its value counters
+	// to the per-row loop.
+	i.pred = i.filter
+	if ip, ok := i.filter.(*InstrumentedPredicate); ok {
+		i.pred = ip.Pred
+		i.stats = &ip.predicateStats
 	}
 
 	// Default value, always clone results until we have
@@ -656,7 +698,7 @@ func (c *SyncIterator) seekRowGroup(seekTo RowNumber, definitionLevel int) (done
 		}
 
 		cc := &ColumnChunkHelper{ColumnChunk: rg.ColumnChunks()[c.column]}
-		if c.filter != nil && !c.filter.KeepColumnChunk(cc) {
+		if c.filter != nil && !c.neverSkip && !keepColumnChunk(c.pred, cc, c.stats) {
 			cc.Close()
 			continue
 		}
@@ -717,7 +759,7 @@ func (c *SyncIterator) seekPages(seekTo RowNumber, definitionLevel int) (done bo
 			}
 
 			// Skip based on filter?
-			if c.filter != nil && !c.filter.KeepPage(pg) {
+			if c.filter != nil && !c.neverSkip && !keepPage(c.pred, pg, c.stats) {
 				c.curr.Skip(pg.NumRows())
 				pq.Release(pg)
 				continue
@@ -814,7 +856,7 @@ func (c *SyncIterator) next() (RowNumber, *pq.Value, error) {
 			}
 
 			cc := &ColumnChunkHelper{ColumnChunk: rg.ColumnChunks()[c.column]}
-			if c.filter != nil && !c.filter.KeepColumnChunk(cc) {
+			if c.filter != nil && !c.neverSkip && !keepColumnChunk(c.pred, cc, c.stats) {
 				cc.Close()
 				continue
 			}
@@ -832,7 +874,7 @@ func (c *SyncIterator) next() (RowNumber, *pq.Value, error) {
 				c.closeCurrRowGroup()
 				continue
 			}
-			if c.filter != nil && !c.filter.KeepPage(pg) {
+			if c.filter != nil && !c.neverSkip && !keepPage(c.pred, pg, c.stats) {
 				// This page filtered out
 				c.curr.Skip(pg.NumRows())
 				pq.Release(pg)
@@ -871,6 +913,13 @@ func (c *SyncIterator) next() (RowNumber, *pq.Value, error) {
 			c.currPageN++
 
 			if c.filter != nil && !c.filter.KeepValue(*v) {
+				continue
+			}
+
+			// Sample among the values that passed the predicate (formerly
+			// samplingPredicate.KeepValue). Dropped values still advanced the row
+			// number above, so accounting stays correct.
+			if c.sampler != nil && !c.sampler.Sample() {
 				continue
 			}
 
@@ -918,6 +967,12 @@ func (c *SyncIterator) setPage(pg pq.Page) {
 		c.currPageMin = c.curr
 		c.currPageMax = rn
 		c.currValues = pg.Values()
+
+		// Tell the sampler how many values this accepted page holds so it can
+		// account for the population it samples from (formerly samplingPredicate.KeepPage).
+		if c.sampler != nil {
+			c.sampler.Expect(uint64(pg.NumValues()))
+		}
 	}
 }
 

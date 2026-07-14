@@ -502,13 +502,13 @@ func (p *OrPredicate) KeepRange(min, max pq.Value) bool {
 }
 
 type InstrumentedPredicate struct {
-	Pred                  Predicate // Optional, if missing then just keeps metrics with no filtering
-	InspectedColumnChunks int64
-	InspectedPages        int64
-	InspectedValues       int64
-	KeptColumnChunks      int64
-	KeptPages             int64
-	KeptValues            int64
+	Pred Predicate // Optional, if missing then just keeps metrics with no filtering
+	// predicateStats holds the chunk/page counters (InspectedColumnChunks,
+	// KeptColumnChunks, InspectedPages, KeptPages), incremented by the iterator's
+	// keep* helpers which take &predicateStats. Promoted fields keep the public API.
+	predicateStats
+	InspectedValues int64
+	KeptValues      int64
 }
 
 var _ Predicate = (*InstrumentedPredicate)(nil)

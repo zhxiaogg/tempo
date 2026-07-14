@@ -35,6 +35,9 @@ func keepColumnChunk(pred Predicate, cc *ColumnChunkHelper, stats *predicateStat
 }
 
 func keepColumnChunkInner(pred Predicate, cc *ColumnChunkHelper) bool {
+	if pred == nil {
+		return true // no predicate: keep everything
+	}
 	keepNull := pred.KeepValue(predicateNullValue())
 
 	if d := cc.Dictionary(); d != nil {
@@ -96,6 +99,9 @@ func keepPage(pred Predicate, pg pq.Page, stats *predicateStats) bool {
 }
 
 func keepPageInner(pred Predicate, pg pq.Page) bool {
+	if pred == nil {
+		return true // no predicate: keep everything
+	}
 	keepNull := pred.KeepValue(predicateNullValue())
 	if keepNull && pg.NumNulls() > 0 {
 		return true

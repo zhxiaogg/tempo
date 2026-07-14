@@ -462,10 +462,18 @@ func (r *reportValuesPredicate) KeepPage(parquet.Page) bool {
 // KeepValue is only called if this column does not have a dictionary. Just report everything to r.cb and
 // return false so the iterator do any extra work.
 func (r *reportValuesPredicate) KeepValue(v parquet.Value) bool {
+	if v.IsNull() {
+		return false
+	}
 	callback(r.cb, v)
 
 	return false
 }
+
+// KeepRange keeps everything: this predicate reports all present values rather
+// than filtering by range. Dictionary reporting happens via KeepValue over the
+// dictionary in the generic chunk helper.
+func (r *reportValuesPredicate) KeepRange(parquet.Value, parquet.Value) bool { return true }
 
 func callback(cb common.TagValuesCallbackV2, v parquet.Value) (stop bool) {
 	switch v.Kind() {

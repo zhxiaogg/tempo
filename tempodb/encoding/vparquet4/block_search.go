@@ -344,10 +344,10 @@ func rawToResults(ctx context.Context, pf *parquet.File, rgs []parquet.RowGroup,
 }
 
 // makeIterFn is a helper to create an iterator, that abstracts away context like file and row groups.
-type makeIterFn func(columnName string, predicate pq.Predicate, selectAs string) pq.Iterator
+type makeIterFn func(columnName string, predicate pq.Predicate, selectAs string, extra ...pq.SyncIteratorOpt) pq.Iterator
 
 func makeIterFunc(ctx context.Context, rgs []parquet.RowGroup, pf *parquet.File) makeIterFn {
-	return func(name string, predicate pq.Predicate, selectAs string) pq.Iterator {
+	return func(name string, predicate pq.Predicate, selectAs string, extra ...pq.SyncIteratorOpt) pq.Iterator {
 		index, _, maxDef := pq.GetColumnIndexByPath(pf, name)
 		if index == -1 {
 			// TODO - don't panic, error instead
@@ -363,13 +363,14 @@ func makeIterFunc(ctx context.Context, rgs []parquet.RowGroup, pf *parquet.File)
 		if name != columnPathSpanID && name != columnPathTraceID {
 			opts = append(opts, pq.SyncIteratorOptIntern())
 		}
+		opts = append(opts, extra...)
 
 		return pq.NewSyncIterator(ctx, rgs, index, opts...)
 	}
 }
 
 func makeNilIterFunc(ctx context.Context, rgs []parquet.RowGroup, pf *parquet.File) makeIterFn {
-	return func(name string, predicate pq.Predicate, selectAs string) pq.Iterator {
+	return func(name string, predicate pq.Predicate, selectAs string, extra ...pq.SyncIteratorOpt) pq.Iterator {
 		index, _, maxDef := pq.GetColumnIndexByPath(pf, name)
 		if index == -1 {
 			// TODO - don't panic, error instead
@@ -386,6 +387,7 @@ func makeNilIterFunc(ctx context.Context, rgs []parquet.RowGroup, pf *parquet.Fi
 		if name != columnPathSpanID && name != columnPathTraceID {
 			opts = append(opts, pq.SyncIteratorOptIntern())
 		}
+		opts = append(opts, extra...)
 
 		return pq.NewNilSyncIterator(ctx, rgs, index, opts...)
 	}
@@ -465,10 +467,18 @@ func (r *reportValuesPredicate) KeepPage(parquet.Page) bool {
 // KeepValue is only called if this column does not have a dictionary. Just report everything to r.cb and
 // return false so the iterator do any extra work.
 func (r *reportValuesPredicate) KeepValue(v parquet.Value) bool {
+	if v.IsNull() {
+		return false
+	}
 	callback(r.cb, v)
 
 	return false
 }
+
+// KeepRange keeps everything: this predicate reports all present values rather
+// than filtering by range. Dictionary reporting happens via KeepValue over the
+// dictionary in the generic chunk helper.
+func (r *reportValuesPredicate) KeepRange(parquet.Value, parquet.Value) bool { return true }
 
 func callback(cb common.TagValuesCallbackV2, v parquet.Value) (stop bool) {
 	switch v.Kind() {
