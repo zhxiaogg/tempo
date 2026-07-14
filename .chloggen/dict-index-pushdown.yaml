@@ -1,0 +1,6 @@
+change_type: enhancement
+component: storage
+note: Simplify the parquetquery `Predicate` interface and add generic dictionary-index pushdown for string predicates, reducing CPU on predicate-bound TraceQL queries.
+issues: []
+subtext:
+user: zhxiaogg
