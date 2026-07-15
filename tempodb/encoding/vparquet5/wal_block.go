@@ -128,7 +128,7 @@ func openWALBlock(filename, path string, ingestionSlack, _ time.Duration) (commo
 		page.ids = common.NewIDMap[int64](int(pf.NumRows()))
 
 		// iterate the parquet file and build the meta
-		iter := makeIterFunc(context.Background(), pf.RowGroups(), pf)(columnPathTraceID, nil, columnPathTraceID)
+		iter := makeIterFunc(context.Background(), pf.RowGroups(), pf)(columnPathTraceID, nil, columnPathTraceID, nil)
 		defer iter.Close()
 
 		for {

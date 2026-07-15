@@ -58,9 +58,9 @@ func TestVirtualRowNumberIterator_Next(t *testing.T) {
 	pf := makeTestFile(t, traces)
 	makeIterator := makeIterFunc(context.Background(), pf.RowGroups(), pf)
 
-	expectIter := makeIterator(columnPathSpanStatusCode, nil, "statusCode") // actual iterator over spans as comparison
+	expectIter := makeIterator(columnPathSpanStatusCode, nil, "statusCode", nil) // actual iterator over spans as comparison
 
-	iter := newVirtualRowNumberIterator(makeIterator(columnPathScopeSpansSpanCount, nil, "spanCount"), DefinitionLevelResourceSpansILSSpan)
+	iter := newVirtualRowNumberIterator(makeIterator(columnPathScopeSpansSpanCount, nil, "spanCount", nil), DefinitionLevelResourceSpansILSSpan)
 
 	for _, expRowNumber := range rowNumbers {
 		res, err := iter.Next()
@@ -141,9 +141,9 @@ func TestVirtualRowNumberIterator_SeekTo(t *testing.T) {
 	pf := makeTestFile(t, traces)
 	makeIterator := makeIterFunc(context.Background(), pf.RowGroups(), pf)
 
-	expectIter := makeIterator(columnPathSpanStatusCode, nil, "statusCode") // actual iterator over spans as comparison
+	expectIter := makeIterator(columnPathSpanStatusCode, nil, "statusCode", nil) // actual iterator over spans as comparison
 
-	iter := newVirtualRowNumberIterator(makeIterator(columnPathScopeSpansSpanCount, nil, "spanCount"), DefinitionLevelResourceSpansILSSpan)
+	iter := newVirtualRowNumberIterator(makeIterator(columnPathScopeSpansSpanCount, nil, "spanCount", nil), DefinitionLevelResourceSpansILSSpan)
 
 	for _, seekPos := range seekPositions {
 		res, err := iter.SeekTo(seekPos.seekRow, seekPos.seekLevel)

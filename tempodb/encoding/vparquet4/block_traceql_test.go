@@ -1555,7 +1555,7 @@ func BenchmarkIterators(b *testing.B) {
 			Pred: predicate,
 		}
 
-		return makeIterInternal(columnName, predicate, selectAs)
+		return makeIterInternal(columnName, predicate, selectAs, nil)
 	}
 
 	b.ResetTimer()

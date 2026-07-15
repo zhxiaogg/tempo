@@ -134,14 +134,14 @@ func makePipelineWithRowGroups(ctx context.Context, req *tempopb.SearchRequest, 
 			case backend.DedicatedColumnTypeInt:
 				if i, err := strconv.ParseInt(v, 10, 64); err == nil {
 					// Column is integer and so is input, do integer comparison.
-					resourceIters = append(resourceIters, makeIter(c.ColumnPath, pq.NewIntEqualPredicate(i), ""))
+					resourceIters = append(resourceIters, makeIter(c.ColumnPath, pq.NewIntEqualPredicate(i), "", nil))
 				} else {
 					// Column is integer but input is not, so fallback to the generic string handling.
 					otherAttrConditions[k] = v
 					continue
 				}
 			case backend.DedicatedColumnTypeString:
-				resourceIters = append(resourceIters, makeIter(c.ColumnPath, pq.NewSubstringPredicate(v), ""))
+				resourceIters = append(resourceIters, makeIter(c.ColumnPath, pq.NewSubstringPredicate(v), "", nil))
 			}
 			continue
 		}
@@ -157,7 +157,7 @@ func makePipelineWithRowGroups(ctx context.Context, req *tempopb.SearchRequest, 
 		// special handling for http status code and span status
 		if k == LabelHTTPStatusCode {
 			if i, err := strconv.ParseInt(v, 10, 64); err == nil {
-				resourceIters = append(resourceIters, makeIter(column, pq.NewIntBetweenPredicate(i, i), ""))
+				resourceIters = append(resourceIters, makeIter(column, pq.NewIntBetweenPredicate(i, i), "", nil))
 				continue
 			}
 			// Non-numeric string field
@@ -166,14 +166,14 @@ func makePipelineWithRowGroups(ctx context.Context, req *tempopb.SearchRequest, 
 		}
 		if k == LabelStatusCode {
 			code := StatusCodeMapping[v]
-			resourceIters = append(resourceIters, makeIter(column, pq.NewIntBetweenPredicate(int64(code), int64(code)), ""))
+			resourceIters = append(resourceIters, makeIter(column, pq.NewIntBetweenPredicate(int64(code), int64(code)), "", nil))
 			continue
 		}
 
 		if k == LabelRootServiceName || k == LabelRootSpanName {
-			traceIters = append(traceIters, makeIter(column, pq.NewSubstringPredicate(v), ""))
+			traceIters = append(traceIters, makeIter(column, pq.NewSubstringPredicate(v), "", nil))
 		} else {
-			resourceIters = append(resourceIters, makeIter(column, pq.NewSubstringPredicate(v), ""))
+			resourceIters = append(resourceIters, makeIter(column, pq.NewSubstringPredicate(v), "", nil))
 		}
 	}
 
@@ -200,13 +200,13 @@ func makePipelineWithRowGroups(ctx context.Context, req *tempopb.SearchRequest, 
 		j := pq.NewUnionIterator(DefinitionLevelResourceSpans, []pq.Iterator{
 			// This iterator finds all keys/values at the resource level
 			pq.NewJoinIterator(DefinitionLevelResourceAttrs, []pq.Iterator{
-				makeIter(FieldResourceAttrKey, keyPred, "keys"),
-				makeIter(FieldResourceAttrVal, valPred, "values"),
+				makeIter(FieldResourceAttrKey, keyPred, "keys", nil),
+				makeIter(FieldResourceAttrVal, valPred, "values", nil),
 			}, nil),
 			// This iterator finds all keys/values at the span level
 			pq.NewJoinIterator(DefinitionLevelResourceSpansILSSpanAttrs, []pq.Iterator{
-				makeIter(FieldSpanAttrKey, keyPred, "keys"),
-				makeIter(FieldSpanAttrVal, valPred, "values"),
+				makeIter(FieldSpanAttrKey, keyPred, "keys", nil),
+				makeIter(FieldSpanAttrVal, valPred, "values", nil),
 			}, nil),
 		}, pq.NewKeyValueGroupPredicate(keys, vals))
 
@@ -236,7 +236,7 @@ func makePipelineWithRowGroups(ctx context.Context, req *tempopb.SearchRequest, 
 		}
 
 		durFilter := pq.NewIntBetweenPredicate(minDur, maxDur)
-		traceIters = append(traceIters, makeIter("DurationNano", durFilter, "Duration"))
+		traceIters = append(traceIters, makeIter("DurationNano", durFilter, "Duration", nil))
 	}
 
 	// Time range filtering?
@@ -245,12 +245,12 @@ func makePipelineWithRowGroups(ctx context.Context, req *tempopb.SearchRequest, 
 
 		// Trace start <= req.End
 		startFilter := pq.NewIntBetweenPredicate(0, time.Unix(int64(req.End), 0).UnixNano())
-		traceIters = append(traceIters, makeIter("StartTimeUnixNano", startFilter, "StartTime"))
+		traceIters = append(traceIters, makeIter("StartTimeUnixNano", startFilter, "StartTime", nil))
 
 		// Trace end >= req.Start, only if column exists
 		if pq.HasColumn(pf, "EndTimeUnixNano") {
 			endFilter := pq.NewIntBetweenPredicate(time.Unix(int64(req.Start), 0).UnixNano(), math.MaxInt64)
-			traceIters = append(traceIters, makeIter("EndTimeUnixNano", endFilter, ""))
+			traceIters = append(traceIters, makeIter("EndTimeUnixNano", endFilter, "", nil))
 		}
 	}
 
@@ -259,7 +259,7 @@ func makePipelineWithRowGroups(ctx context.Context, req *tempopb.SearchRequest, 
 	case 0:
 		// Empty request, in this case every trace matches so we can
 		// simply iterate any column.
-		return makeIter("TraceID", nil, "")
+		return makeIter("TraceID", nil, "", nil)
 
 	case 1:
 		// There is only 1 iterator already, no need to wrap it up
@@ -330,11 +330,11 @@ func rawToResults(ctx context.Context, pf *parquet.File, rgs []parquet.RowGroup,
 	results := []*tempopb.TraceSearchMetadata{}
 	iter2 := pq.NewJoinIterator(DefinitionLevelTrace, []pq.Iterator{
 		&rowNumberIterator{rowNumbers: rowNumbers},
-		makeIter("TraceID", nil, "TraceID"),
-		makeIter("RootServiceName", nil, "RootServiceName"),
-		makeIter("RootSpanName", nil, "RootSpanName"),
-		makeIter("StartTimeUnixNano", nil, "StartTimeUnixNano"),
-		makeIter("DurationNano", nil, "DurationNano"),
+		makeIter("TraceID", nil, "TraceID", nil),
+		makeIter("RootServiceName", nil, "RootServiceName", nil),
+		makeIter("RootSpanName", nil, "RootSpanName", nil),
+		makeIter("StartTimeUnixNano", nil, "StartTimeUnixNano", nil),
+		makeIter("DurationNano", nil, "DurationNano", nil),
 	}, nil)
 	defer iter2.Close()
 
@@ -362,11 +362,11 @@ func rawToResults(ctx context.Context, pf *parquet.File, rgs []parquet.RowGroup,
 }
 
 // makeIterFn is a helper to create an iterator, that abstracts away context like file and row groups.
-// sampler is optional (at most one) and ignored by nil iterators.
-type makeIterFn func(columnName string, predicate pq.Predicate, selectAs string, sampler ...pq.Sampler) pq.Iterator
+// sampler is nil unless the column drives sampling; it is ignored by nil iterators.
+type makeIterFn func(columnName string, predicate pq.Predicate, selectAs string, sampler pq.Sampler) pq.Iterator
 
 func makeIterFunc(ctx context.Context, rgs []parquet.RowGroup, pf *parquet.File) makeIterFn {
-	return func(name string, predicate pq.Predicate, selectAs string, sampler ...pq.Sampler) pq.Iterator {
+	return func(name string, predicate pq.Predicate, selectAs string, sampler pq.Sampler) pq.Iterator {
 		index, _, maxDef := pq.GetColumnIndexByPath(pf, name)
 		if index == -1 {
 			// TODO - don't panic, error instead
@@ -382,8 +382,8 @@ func makeIterFunc(ctx context.Context, rgs []parquet.RowGroup, pf *parquet.File)
 		if name != columnPathSpanID && name != columnPathTraceID {
 			opts = append(opts, pq.SyncIteratorOptIntern())
 		}
-		if len(sampler) > 0 && sampler[0] != nil {
-			opts = append(opts, pq.SyncIteratorOptSampler(sampler[0]))
+		if sampler != nil {
+			opts = append(opts, pq.SyncIteratorOptSampler(sampler))
 		}
 
 		return pq.NewSyncIterator(ctx, rgs, index, opts...)
@@ -391,7 +391,7 @@ func makeIterFunc(ctx context.Context, rgs []parquet.RowGroup, pf *parquet.File)
 }
 
 func makeNilIterFunc(ctx context.Context, rgs []parquet.RowGroup, pf *parquet.File) makeIterFn {
-	return func(name string, predicate pq.Predicate, selectAs string, _ ...pq.Sampler) pq.Iterator {
+	return func(name string, predicate pq.Predicate, selectAs string, _ pq.Sampler) pq.Iterator {
 		index, _, maxDef := pq.GetColumnIndexByPath(pf, name)
 		if index == -1 {
 			// TODO - don't panic, error instead

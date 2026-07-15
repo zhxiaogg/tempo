@@ -393,13 +393,13 @@ func searchKeyValues(definitionLevel int, keyPath, stringPath, intPath, floatPat
 
 	iter, err := pq.NewLeftJoinIterator(definitionLevel,
 		// This is required
-		[]pq.Iterator{makeIter(keyPath, keyPred, "")},
+		[]pq.Iterator{makeIter(keyPath, keyPred, "", nil)},
 		[]pq.Iterator{
-			// These are optional and we find matching values of all types
-			makeIter(stringPath, skipNils, "string"),
-			makeIter(intPath, skipNils, "int"),
-			makeIter(floatPath, skipNils, "float"),
-			makeIter(boolPath, skipNils, "bool"),
+
+			makeIter(stringPath, skipNils, "string", nil),
+			makeIter(intPath, skipNils, "int", nil),
+			makeIter(floatPath, skipNils, "float", nil),
+			makeIter(boolPath, skipNils, "bool", nil),
 		}, nil)
 	if err != nil {
 		return fmt.Errorf("pq.NewLeftJoinIterator failed: %w", err)
@@ -431,7 +431,7 @@ func searchSpecialTagValues(ctx context.Context, column string, pf *parquet.File
 	pred := newReportValuesPredicate(cb)
 	rgs := pf.RowGroups()
 
-	iter := makeIterFunc(ctx, rgs, pf)(column, pred, "")
+	iter := makeIterFunc(ctx, rgs, pf)(column, pred, "", nil)
 	defer iter.Close()
 	for {
 		match, err := iter.Next()

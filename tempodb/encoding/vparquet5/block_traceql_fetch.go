@@ -254,35 +254,35 @@ func createTraceIterators(
 		case traceql.IntrinsicTraceID:
 			if cond.Op == traceql.OpNone && cond.CallBack != nil {
 				// This is expected to quit early, so it is always optional below.
-				alwaysOptional = append(alwaysOptional, makeIter(columnPathTraceID, parquetquery.NewCallbackPredicate(cond.CallBack), columnPathTraceID))
+				alwaysOptional = append(alwaysOptional, makeIter(columnPathTraceID, parquetquery.NewCallbackPredicate(cond.CallBack), columnPathTraceID, nil))
 			} else {
 				pred, err := createBytesPredicate(cond.Op, cond.Operands, false)
 				if err != nil {
 					return nil, nil, err
 				}
-				optional = append(optional, makeIter(columnPathTraceID, pred, columnPathTraceID))
+				optional = append(optional, makeIter(columnPathTraceID, pred, columnPathTraceID, nil))
 			}
 		case traceql.IntrinsicTraceRootService:
 			pred, err := createStringPredicate(cond.Op, cond.Operands)
 			if err != nil {
 				return nil, nil, err
 			}
-			optional = append(optional, makeIter(columnPathRootServiceName, pred, columnPathRootServiceName))
+			optional = append(optional, makeIter(columnPathRootServiceName, pred, columnPathRootServiceName, nil))
 		case traceql.IntrinsicTraceRootSpan:
 			pred, err := createStringPredicate(cond.Op, cond.Operands)
 			if err != nil {
 				return nil, nil, err
 			}
-			optional = append(optional, makeIter(columnPathRootSpanName, pred, columnPathRootSpanName))
+			optional = append(optional, makeIter(columnPathRootSpanName, pred, columnPathRootSpanName, nil))
 		case traceql.IntrinsicTraceDuration:
 			pred, err := createDurationPredicate(cond.Op, cond.Operands)
 			if err != nil {
 				return nil, nil, err
 			}
-			optional = append(optional, makeIter(columnPathDurationNanos, pred, columnPathDurationNanos))
+			optional = append(optional, makeIter(columnPathDurationNanos, pred, columnPathDurationNanos, nil))
 		case traceql.IntrinsicTraceStartTime:
 			if start == 0 && end == 0 {
-				optional = append(optional, makeIter(columnPathStartTimeUnixNano, nil, columnPathStartTimeUnixNano))
+				optional = append(optional, makeIter(columnPathStartTimeUnixNano, nil, columnPathStartTimeUnixNano, nil))
 			}
 		case traceql.IntrinsicServiceStats:
 			optional = append(optional, createServiceStatsIterator(makeIter))
@@ -299,8 +299,8 @@ func createTraceIterators(
 		startFilter = parquetquery.NewIntBetweenPredicate(0, int64(end))
 		endFilter = parquetquery.NewIntBetweenPredicate(int64(start), math.MaxInt64)
 
-		required = append(required, makeIter(columnPathStartTimeUnixNano, startFilter, columnPathStartTimeUnixNano))
-		required = append(required, makeIter(columnPathEndTimeUnixNano, endFilter, columnPathEndTimeUnixNano))
+		required = append(required, makeIter(columnPathStartTimeUnixNano, startFilter, columnPathStartTimeUnixNano, nil))
+		required = append(required, makeIter(columnPathEndTimeUnixNano, endFilter, columnPathEndTimeUnixNano, nil))
 	}
 
 	if selectAll {
@@ -315,7 +315,7 @@ func createTraceIterators(
 				traceql.IntrinsicServiceStats:
 				continue
 			}
-			required = append(required, makeIter(entry.columnPath, nil, entry.columnPath))
+			required = append(required, makeIter(entry.columnPath, nil, entry.columnPath, nil))
 		}
 	}
 
@@ -361,7 +361,7 @@ func createResourceIterators(
 			columnSelectAs[columnPath] = cond.Attribute.Name
 			return true
 		case traceql.OpNotExists:
-			optional = append(optional, makeIter(columnPath, parquetquery.NewNilValuePredicate(), cond.Attribute.Name))
+			optional = append(optional, makeIter(columnPath, parquetquery.NewNilValuePredicate(), cond.Attribute.Name, nil))
 			return true
 		default:
 			return false
@@ -382,7 +382,7 @@ func createResourceIterators(
 				if err != nil {
 					return nil, nil, fmt.Errorf("creating predicate: %w", err)
 				}
-				optional = append(optional, makeIter(entry.columnPath, pred, entry.columnPath))
+				optional = append(optional, makeIter(entry.columnPath, pred, entry.columnPath, nil))
 				continue
 			}
 		}
@@ -409,7 +409,7 @@ func createResourceIterators(
 		// check attr not exists
 		if cond.Op == traceql.OpNotExists {
 			pred := parquetquery.NewIncludeNilStringEqualPredicate([]byte(cond.Attribute.Name))
-			optional = append(optional, makeNilIter(columnPathResourceAttrKey, pred, cond.Attribute.Name))
+			optional = append(optional, makeNilIter(columnPathResourceAttrKey, pred, cond.Attribute.Name, nil))
 			continue
 		}
 
@@ -435,7 +435,7 @@ func createResourceIterators(
 	}
 
 	for columnPath, predicates := range columnPredicates {
-		optional = append(optional, makeIter(columnPath, orIfNeeded(predicates), columnSelectAs[columnPath]))
+		optional = append(optional, makeIter(columnPath, orIfNeeded(predicates), columnSelectAs[columnPath], nil))
 	}
 
 	attrIter, err := createScopedAttributeIterator(
@@ -522,7 +522,7 @@ func createSpanIterators(
 			columnSelectAs[columnPath] = cond.Attribute.Name
 			return true
 		case traceql.OpNotExists:
-			optional = append(optional, makeIter(columnPath, parquetquery.NewNilValuePredicate(), cond.Attribute.Name))
+			optional = append(optional, makeIter(columnPath, parquetquery.NewNilValuePredicate(), cond.Attribute.Name, nil))
 			return true
 		default:
 			return false
@@ -698,7 +698,7 @@ func createSpanIterators(
 		if cond.Op == traceql.OpNotExists {
 			// Generic attr doesn't exist
 			pred := parquetquery.NewIncludeNilStringEqualPredicate([]byte(cond.Attribute.Name))
-			optional = append(optional, makeNilIter(columnPathSpanAttrKey, pred, cond.Attribute.Name))
+			optional = append(optional, makeNilIter(columnPathSpanAttrKey, pred, cond.Attribute.Name, nil))
 			continue
 		}
 
@@ -746,11 +746,11 @@ func createSpanIterators(
 	}
 
 	for columnPath, predicates := range columnPredicates {
-		var s []parquetquery.Sampler
+		var s parquetquery.Sampler
 		if columnPath == samplerColumn && sampler != nil {
-			s = []parquetquery.Sampler{sampler}
+			s = sampler
 		}
-		optional = append(optional, makeIter(columnPath, orIfNeeded(predicates), columnSelectAs[columnPath], s...))
+		optional = append(optional, makeIter(columnPath, orIfNeeded(predicates), columnSelectAs[columnPath], s))
 	}
 
 	attrIter, err := createScopedAttributeIterator(
@@ -785,11 +785,11 @@ func createSpanIterators(
 	// iterator for other cases.
 	if needDriver {
 		if len(required) == 0 {
-			var s []parquetquery.Sampler
+			var s parquetquery.Sampler
 			if sampler != nil && samplerColumn == "" {
-				s = []parquetquery.Sampler{sampler}
+				s = sampler
 			}
-			driver = newVirtualRowNumberIterator(makeIter(columnPathScopeSpansSpanCount, nil, "spanCount", s...), DefinitionLevelResourceSpansILSSpan)
+			driver = newVirtualRowNumberIterator(makeIter(columnPathScopeSpansSpanCount, nil, "spanCount", s), DefinitionLevelResourceSpansILSSpan)
 		} else {
 			// use the first required iterator as the driver
 			driver = required[0]
@@ -837,7 +837,7 @@ func createEventIterators(
 			columnSelectAs[columnPath] = cond.Attribute.Name
 			return true
 		case traceql.OpNotExists:
-			optional = append(optional, makeIter(columnPath, parquetquery.NewNilValuePredicate(), cond.Attribute.Name))
+			optional = append(optional, makeIter(columnPath, parquetquery.NewNilValuePredicate(), cond.Attribute.Name, nil))
 			return true
 		default:
 			return false
@@ -851,14 +851,14 @@ func createEventIterators(
 			if err != nil {
 				return nil, nil, err
 			}
-			optional = append(optional, makeIter(ColumnPathEventName, pred, ColumnPathEventName))
+			optional = append(optional, makeIter(ColumnPathEventName, pred, ColumnPathEventName, nil))
 			continue
 		case traceql.IntrinsicEventTimeSinceStart:
 			pred, err := createIntPredicate(cond.Op, cond.Operands)
 			if err != nil {
 				return nil, nil, err
 			}
-			optional = append(optional, makeIter(columnPathEventTimeSinceStart, pred, columnPathEventTimeSinceStart))
+			optional = append(optional, makeIter(columnPathEventTimeSinceStart, pred, columnPathEventTimeSinceStart, nil))
 			continue
 		}
 
@@ -884,7 +884,7 @@ func createEventIterators(
 		if cond.Op == traceql.OpNotExists {
 			// Generic attr doesn't exist
 			pred := parquetquery.NewIncludeNilStringEqualPredicate([]byte(cond.Attribute.Name))
-			optional = append(optional, makeNilIter(columnPathEventAttrKey, pred, cond.Attribute.Name))
+			optional = append(optional, makeNilIter(columnPathEventAttrKey, pred, cond.Attribute.Name, nil))
 			continue
 		}
 
@@ -892,7 +892,7 @@ func createEventIterators(
 	}
 
 	for columnPath, predicates := range columnPredicates {
-		optional = append(optional, makeIter(columnPath, orIfNeeded(predicates), columnSelectAs[columnPath]))
+		optional = append(optional, makeIter(columnPath, orIfNeeded(predicates), columnSelectAs[columnPath], nil))
 	}
 
 	attrIter, err := createScopedAttributeIterator(
@@ -938,7 +938,7 @@ func createLinkIterators(makeIter, makeNilIter makeIterFn, conditions []traceql.
 			if err != nil {
 				return nil, nil, err
 			}
-			optional = append(optional, makeIter(columnPathLinkTraceID, pred, columnPathLinkTraceID))
+			optional = append(optional, makeIter(columnPathLinkTraceID, pred, columnPathLinkTraceID, nil))
 			continue
 
 		case traceql.IntrinsicLinkSpanID:
@@ -946,14 +946,14 @@ func createLinkIterators(makeIter, makeNilIter makeIterFn, conditions []traceql.
 			if err != nil {
 				return nil, nil, err
 			}
-			optional = append(optional, makeIter(columnPathLinkSpanID, pred, columnPathLinkSpanID))
+			optional = append(optional, makeIter(columnPathLinkSpanID, pred, columnPathLinkSpanID, nil))
 			continue
 		}
 
 		if cond.Op == traceql.OpNotExists {
 			// Generic attr doesn't exist
 			pred := parquetquery.NewIncludeNilStringEqualPredicate([]byte(cond.Attribute.Name))
-			optional = append(optional, makeNilIter(columnPathLinkAttrKey, pred, cond.Attribute.Name))
+			optional = append(optional, makeNilIter(columnPathLinkAttrKey, pred, cond.Attribute.Name, nil))
 			continue
 		}
 
@@ -995,14 +995,14 @@ func createInstrumentationIterators(makeIter, makeNilIter makeIterFn, conditions
 			if err != nil {
 				return nil, nil, err
 			}
-			optional = append(optional, makeIter(columnPathInstrumentationName, pred, columnPathInstrumentationName))
+			optional = append(optional, makeIter(columnPathInstrumentationName, pred, columnPathInstrumentationName, nil))
 			continue
 		case traceql.IntrinsicInstrumentationVersion:
 			pred, err := createStringPredicate(cond.Op, cond.Operands)
 			if err != nil {
 				return nil, nil, err
 			}
-			optional = append(optional, makeIter(columnPathInstrumentationVersion, pred, columnPathInstrumentationVersion))
+			optional = append(optional, makeIter(columnPathInstrumentationVersion, pred, columnPathInstrumentationVersion, nil))
 			continue
 		}
 
@@ -1010,7 +1010,7 @@ func createInstrumentationIterators(makeIter, makeNilIter makeIterFn, conditions
 		if cond.Op == traceql.OpNotExists {
 			// Generic attr doesn't exist
 			pred := parquetquery.NewIncludeNilStringEqualPredicate([]byte(cond.Attribute.Name))
-			optional = append(optional, makeNilIter(columnPathInstrumentationAttrKey, pred, cond.Attribute.Name))
+			optional = append(optional, makeNilIter(columnPathInstrumentationAttrKey, pred, cond.Attribute.Name, nil))
 			continue
 		}
 
@@ -1023,7 +1023,7 @@ func createInstrumentationIterators(makeIter, makeNilIter makeIterFn, conditions
 			if entry.scope != intrinsicScopeInstrumentation {
 				continue
 			}
-			optional = append(optional, makeIter(entry.columnPath, nil, entry.columnPath))
+			optional = append(optional, makeIter(entry.columnPath, nil, entry.columnPath, nil))
 		}
 	}
 
@@ -1158,11 +1158,11 @@ func createScopedAttributeIterator(makeIter makeIterFn, conditions []traceql.Con
 		return parquetquery.NewLeftJoinIterator(definitionLevel,
 			nil, nil, nil,
 			parquetquery.WithCollector(newScopedAttributeCollector(scope)),
-			parquetquery.WithIterator(definitionLevel, makeIter(keyPath, skipNils, "key"), false, nil),
-			parquetquery.WithIterator(definitionLevel, makeIter(strPath, skipNils, "string"), true, nil),
-			parquetquery.WithIterator(definitionLevel, makeIter(intPath, skipNils, "int"), true, nil),
-			parquetquery.WithIterator(definitionLevel, makeIter(floatPath, skipNils, "float"), true, nil),
-			parquetquery.WithIterator(definitionLevel, makeIter(boolPath, skipNils, "bool"), true, nil),
+			parquetquery.WithIterator(definitionLevel, makeIter(keyPath, skipNils, "key", nil), false, nil),
+			parquetquery.WithIterator(definitionLevel, makeIter(strPath, skipNils, "string", nil), true, nil),
+			parquetquery.WithIterator(definitionLevel, makeIter(intPath, skipNils, "int", nil), true, nil),
+			parquetquery.WithIterator(definitionLevel, makeIter(floatPath, skipNils, "float", nil), true, nil),
+			parquetquery.WithIterator(definitionLevel, makeIter(boolPath, skipNils, "bool", nil), true, nil),
 			parquetquery.WithPool(pqAttrPool))
 	}
 
@@ -1231,16 +1231,16 @@ func createScopedAttributeIterator(makeIter makeIterFn, conditions []traceql.Con
 	var iters []parquetquery.Iterator
 
 	if len(attrStringPreds) > 0 {
-		iters = append(iters, makeIter(strPath, orIfNeeded(attrStringPreds), "string"))
+		iters = append(iters, makeIter(strPath, orIfNeeded(attrStringPreds), "string", nil))
 	}
 	if len(attrIntPreds) > 0 {
-		iters = append(iters, makeIter(intPath, orIfNeeded(attrIntPreds), "int"))
+		iters = append(iters, makeIter(intPath, orIfNeeded(attrIntPreds), "int", nil))
 	}
 	if len(attrFltPreds) > 0 {
-		iters = append(iters, makeIter(floatPath, orIfNeeded(attrFltPreds), "float"))
+		iters = append(iters, makeIter(floatPath, orIfNeeded(attrFltPreds), "float", nil))
 	}
 	if len(boolPreds) > 0 {
-		iters = append(iters, makeIter(boolPath, orIfNeeded(boolPreds), "bool"))
+		iters = append(iters, makeIter(boolPath, orIfNeeded(boolPreds), "bool", nil))
 	}
 
 	if len(iters) == 0 {
@@ -1249,7 +1249,7 @@ func createScopedAttributeIterator(makeIter makeIterFn, conditions []traceql.Con
 	}
 
 	opts := []parquetquery.LeftJoinIteratorOption{
-		parquetquery.WithIterator(definitionLevel, makeIter(keyPath, parquetquery.NewStringInPredicate(attrKeys), "key"), false, nil),
+		parquetquery.WithIterator(definitionLevel, makeIter(keyPath, parquetquery.NewStringInPredicate(attrKeys), "key", nil), false, nil),
 		parquetquery.WithPool(pqAttrPool),
 		parquetquery.WithCollector(newScopedAttributeCollector(scope)),
 	}
