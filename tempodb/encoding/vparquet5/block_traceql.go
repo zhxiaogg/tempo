@@ -2020,6 +2020,9 @@ func createSpanIterator(makeIter, makeNilIter makeIterFn, innerIterators []parqu
 		nestedSetLeftExplicit   = false
 		nestedSetRightExplicit  = false
 		nestedSetParentExplicit = false
+		// samplerColumn is the column whose iterator carries the span sampler (set when
+		// sampling attaches to the start-time condition); the build loop applies it there.
+		samplerColumn string
 	)
 
 	// todo: improve these methods. if addPredicate gets a nil predicate shouldn't it just wipe out the existing predicates instead of appending?
@@ -2093,30 +2096,28 @@ func createSpanIterator(makeIter, makeNilIter makeIterFn, innerIterators []parqu
 				return nil, err
 			}
 
-			if sampler != nil {
-				pred = newSamplingPredicate(sampler, pred)
-				// Removed so that it's not used down below.
-				sampler = nil
-			}
-
 			// Choose the least precise column possible.
 			// The step interval must be an even multiple of the pre-rounded precision.
+			var startCol string
 			switch {
 			case cond.Precision >= 3600*time.Second && cond.Precision%(3600*time.Second) == 0:
-				addPredicate(columnPathSpanStartRounded3600, pred)
-				columnSelectAs[columnPathSpanStartRounded3600] = columnPathSpanStartRounded3600
+				startCol = columnPathSpanStartRounded3600
 			case cond.Precision >= 300*time.Second && cond.Precision%(300*time.Second) == 0:
-				addPredicate(columnPathSpanStartRounded300, pred)
-				columnSelectAs[columnPathSpanStartRounded300] = columnPathSpanStartRounded300
+				startCol = columnPathSpanStartRounded300
 			case cond.Precision >= 60*time.Second && cond.Precision%(60*time.Second) == 0:
-				addPredicate(columnPathSpanStartRounded60, pred)
-				columnSelectAs[columnPathSpanStartRounded60] = columnPathSpanStartRounded60
+				startCol = columnPathSpanStartRounded60
 			case cond.Precision >= 15*time.Second && cond.Precision%(15*time.Second) == 0:
-				addPredicate(columnPathSpanStartRounded15, pred)
-				columnSelectAs[columnPathSpanStartRounded15] = columnPathSpanStartRounded15
+				startCol = columnPathSpanStartRounded15
 			default:
-				addPredicate(columnPathSpanStartTime, pred)
-				columnSelectAs[columnPathSpanStartTime] = columnPathSpanStartTime
+				startCol = columnPathSpanStartTime
+			}
+			addPredicate(startCol, pred)
+			columnSelectAs[startCol] = startCol
+
+			if sampler != nil {
+				// Sampling drives on the start-time column via the iterator, not a
+				// predicate wrapper; the driver fallback is gated on samplerColumn.
+				samplerColumn = startCol
 			}
 			continue
 
@@ -2285,7 +2286,11 @@ func createSpanIterator(makeIter, makeNilIter makeIterFn, innerIterators []parqu
 	}
 
 	for columnPath, predicates := range columnPredicates {
-		iters = append(iters, makeIter(columnPath, orIfNeeded(predicates), columnSelectAs[columnPath]))
+		var extra []parquetquery.SyncIteratorOpt
+		if columnPath == samplerColumn && sampler != nil {
+			extra = append(extra, parquetquery.SyncIteratorOptSampler(sampler))
+		}
+		iters = append(iters, makeIter(columnPath, orIfNeeded(predicates), columnSelectAs[columnPath], extra...))
 	}
 
 	attrIter, err := createAttributeIterator(makeIter, genericConditions, DefinitionLevelResourceSpansILSSpanAttrs,
@@ -2329,11 +2334,11 @@ func createSpanIterator(makeIter, makeNilIter makeIterFn, innerIterators []parqu
 	// If there are no direct conditions imposed on the span level we are evaluating the SpanCount column to
 	// calculate all span row numbers.
 	if len(required) == 0 {
-		var pred parquetquery.Predicate
-		if sampler != nil {
-			pred = newSamplingPredicate(sampler, nil)
+		var extra []parquetquery.SyncIteratorOpt
+		if sampler != nil && samplerColumn == "" {
+			extra = append(extra, parquetquery.SyncIteratorOptSampler(sampler))
 		}
-		required = []parquetquery.Iterator{newVirtualRowNumberIterator(makeIter(columnPathScopeSpansSpanCount, pred, "spanCount"), DefinitionLevelResourceSpansILSSpan)}
+		required = []parquetquery.Iterator{newVirtualRowNumberIterator(makeIter(columnPathScopeSpansSpanCount, nil, "spanCount", extra...), DefinitionLevelResourceSpansILSSpan)}
 	}
 
 	// Left join here means the span id/start/end iterators + 1 are required,
@@ -2678,8 +2683,9 @@ func createTraceIterator(makeIter makeIterFn, resourceIter parquetquery.Iterator
 		// TODO: We might be able to do this without loading a real column, by using
 		// the fact that every trace is a top-level row and there are no gaps. We could
 		// inspect the number of rows in the given row groups and generate virtual row numbers.
-		pred := newSamplingPredicate(sampler, nil)
-		i := makeIter(columnPathRootServiceName, pred, "")
+		// Trace-level sampling: the sampler thins the traces this driver column
+		// emits (formerly newSamplingPredicate on RootServiceName).
+		i := makeIter(columnPathRootServiceName, nil, "", parquetquery.SyncIteratorOptSampler(sampler))
 		required = append([]parquetquery.Iterator{i}, required...)
 	}
 
@@ -4009,48 +4015,3 @@ func otlpKindToTraceqlKind(v uint64) traceql.Kind {
 	}
 }
 
-type samplingPredicate struct {
-	sampler traceql.Sampler
-	inner   parquetquery.Predicate
-}
-
-var _ parquetquery.Predicate = (*samplingPredicate)(nil)
-
-func newSamplingPredicate(sampler traceql.Sampler, inner parquetquery.Predicate) *samplingPredicate {
-	return &samplingPredicate{
-		sampler: sampler,
-		inner:   inner,
-	}
-}
-
-func (p *samplingPredicate) String() string {
-	return "samplingPredicate{}"
-}
-
-func (p *samplingPredicate) KeepColumnChunk(chunk *parquetquery.ColumnChunkHelper) bool {
-	if p.inner != nil {
-		return p.inner.KeepColumnChunk(chunk)
-	}
-	return true
-}
-
-func (p *samplingPredicate) KeepPage(page parquet.Page) bool {
-	if p.inner != nil && !p.inner.KeepPage(page) {
-		return false
-	}
-
-	// We call Expect() on page because it is closer to the actual data
-	// to be processed.  We could call it earlier in KeepColumnChunk()
-	// but it reduces effectiveness of the sampler because we may
-	// skip around or exit early due to any other conditions.
-	p.sampler.Expect(uint64(page.NumValues()))
-	return true
-}
-
-func (p *samplingPredicate) KeepValue(value parquet.Value) bool {
-	if p.inner != nil && !p.inner.KeepValue(value) {
-		return false
-	}
-
-	return p.sampler.Sample()
-}

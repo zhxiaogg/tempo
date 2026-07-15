@@ -20,6 +20,9 @@ var _ Iterator = (*NilSyncIterator)(nil)
 func NewNilSyncIterator(ctx context.Context, rgs []pq.RowGroup, column int, opts ...SyncIteratorOpt) *NilSyncIterator {
 	// Create the sync iterator
 	syncIterator := NewSyncIterator(ctx, rgs, column, opts...)
+	// A nil iterator detects the ABSENCE of a matching value per scope, so it must scan
+	// every chunk/page rather than prune on a predicate match. It has its own non-pruning
+	// next() below, and its SeekTo drives the shared seek path with prune=false.
 
 	i := &NilSyncIterator{
 		SyncIterator:          *syncIterator,
@@ -54,11 +57,11 @@ func (c *NilSyncIterator) Next() (*IteratorResult, error) {
 
 func (c *NilSyncIterator) SeekTo(to RowNumber, definitionLevel int) (*IteratorResult, error) {
 	for {
-		if done := c.seekRowGroup(to, definitionLevel); done {
+		if done := c.seekRowGroup(to, definitionLevel, false); done {
 			return nil, nil
 		}
 
-		done, err := c.seekPages(to, definitionLevel)
+		done, err := c.seekPages(to, definitionLevel, false)
 		if err != nil {
 			return nil, err
 		}
@@ -133,12 +136,10 @@ func (c *NilSyncIterator) next() (RowNumber, *pq.Value, error) {
 				return EmptyRowNumber(), nil, nil
 			}
 
+			// A nil iterator detects the ABSENCE of a matching value per scope, so it
+			// must scan every chunk/page — predicate pruning would drop the very scopes it
+			// needs to emit as nil. Hence no keepColumnChunk gate here (unlike SyncIterator).
 			cc := &ColumnChunkHelper{ColumnChunk: rg.ColumnChunks()[c.column]}
-			if c.filter != nil && !c.filter.KeepColumnChunk(cc) {
-				cc.Close()
-				continue
-			}
-
 			c.setRowGroup(rg, minRN, maxRN, cc)
 		}
 
@@ -152,12 +153,7 @@ func (c *NilSyncIterator) next() (RowNumber, *pq.Value, error) {
 				c.closeCurrRowGroup()
 				continue
 			}
-			if c.filter != nil && !c.filter.KeepPage(pg) {
-				// This page filtered out
-				c.curr.Skip(pg.NumRows())
-				pq.Release(pg)
-				continue
-			}
+			// No page pruning: see the note in the row-group loop above.
 			c.setPage(pg)
 		}
 

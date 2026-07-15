@@ -481,6 +481,10 @@ func createSpanIterators(
 		columnPredicates  = map[string][]parquetquery.Predicate{}
 		genericConditions []traceql.Condition
 		columnMapping     = dedicatedColumnsToColumnMapping(dedicatedColumns, backend.DedicatedColumnScopeSpan)
+		// samplerColumn is the column whose iterator carries the span sampler (set when
+		// sampling attaches to a start-time condition). The build loop applies the
+		// sampler option to that column instead of wrapping its predicate.
+		samplerColumn string
 	)
 
 	// todo: improve these methods. if addPredicate gets a nil predicate shouldn't it just wipe out the existing predicates instead of appending?
@@ -554,30 +558,29 @@ func createSpanIterators(
 				return nil, nil, nil, err
 			}
 
-			if sampler != nil {
-				pred = newSamplingPredicate(sampler, pred)
-				// Removed so that it's not used down below.
-				sampler = nil
-			}
-
 			// Choose the least precise column possible.
 			// The step interval must be an even multiple of the pre-rounded precision.
+			var startCol string
 			switch {
 			case cond.Precision >= 3600*time.Second && cond.Precision%(3600*time.Second) == 0:
-				addPredicate(columnPathSpanStartRounded3600, pred)
-				columnSelectAs[columnPathSpanStartRounded3600] = columnPathSpanStartRounded3600
+				startCol = columnPathSpanStartRounded3600
 			case cond.Precision >= 300*time.Second && cond.Precision%(300*time.Second) == 0:
-				addPredicate(columnPathSpanStartRounded300, pred)
-				columnSelectAs[columnPathSpanStartRounded300] = columnPathSpanStartRounded300
+				startCol = columnPathSpanStartRounded300
 			case cond.Precision >= 60*time.Second && cond.Precision%(60*time.Second) == 0:
-				addPredicate(columnPathSpanStartRounded60, pred)
-				columnSelectAs[columnPathSpanStartRounded60] = columnPathSpanStartRounded60
+				startCol = columnPathSpanStartRounded60
 			case cond.Precision >= 15*time.Second && cond.Precision%(15*time.Second) == 0:
-				addPredicate(columnPathSpanStartRounded15, pred)
-				columnSelectAs[columnPathSpanStartRounded15] = columnPathSpanStartRounded15
+				startCol = columnPathSpanStartRounded15
 			default:
-				addPredicate(columnPathSpanStartTime, pred)
-				columnSelectAs[columnPathSpanStartTime] = columnPathSpanStartTime
+				startCol = columnPathSpanStartTime
+			}
+			addPredicate(startCol, pred)
+			columnSelectAs[startCol] = startCol
+
+			if sampler != nil {
+				// Sampling drives on the start-time column via the iterator, not a
+				// predicate wrapper. Mark the column; the build loop attaches the sampler.
+				// The driver fallback below is gated on samplerColumn so it won't double-attach.
+				samplerColumn = startCol
 			}
 			continue
 		case traceql.IntrinsicName:
@@ -747,7 +750,11 @@ func createSpanIterators(
 	}
 
 	for columnPath, predicates := range columnPredicates {
-		optional = append(optional, makeIter(columnPath, orIfNeeded(predicates), columnSelectAs[columnPath]))
+		var extra []parquetquery.SyncIteratorOpt
+		if columnPath == samplerColumn && sampler != nil {
+			extra = append(extra, parquetquery.SyncIteratorOptSampler(sampler))
+		}
+		optional = append(optional, makeIter(columnPath, orIfNeeded(predicates), columnSelectAs[columnPath], extra...))
 	}
 
 	attrIter, err := createScopedAttributeIterator(
@@ -782,11 +789,11 @@ func createSpanIterators(
 	// iterator for other cases.
 	if needDriver {
 		if len(required) == 0 {
-			var pred parquetquery.Predicate
-			if sampler != nil {
-				pred = newSamplingPredicate(sampler, nil)
+			var extra []parquetquery.SyncIteratorOpt
+			if sampler != nil && samplerColumn == "" {
+				extra = append(extra, parquetquery.SyncIteratorOptSampler(sampler))
 			}
-			driver = newVirtualRowNumberIterator(makeIter(columnPathScopeSpansSpanCount, pred, "spanCount"), DefinitionLevelResourceSpansILSSpan)
+			driver = newVirtualRowNumberIterator(makeIter(columnPathScopeSpansSpanCount, nil, "spanCount", extra...), DefinitionLevelResourceSpansILSSpan)
 		} else {
 			// use the first required iterator as the driver
 			driver = required[0]
