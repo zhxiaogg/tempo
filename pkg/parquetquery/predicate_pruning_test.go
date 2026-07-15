@@ -139,24 +139,26 @@ func TestKeepStatsCounters(t *testing.T) {
 		require.NoError(t, w.Write(&testDictString{"abc"}))
 	})
 
-	// An InstrumentedPredicate sets c.stats, so keepColumnChunk counts into it.
-	keepIP := &InstrumentedPredicate{Pred: NewStringInPredicate([]string{"abc"})}
-	keepIt := NewSyncIterator(context.TODO(), r.RowGroups(), 0, SyncIteratorOptPredicate(keepIP))
+	// SyncIteratorOptStats attaches a PredicateStats, so keepColumnChunk counts into it.
+	var keepStats PredicateStats
+	keepIt := NewSyncIterator(context.TODO(), r.RowGroups(), 0,
+		SyncIteratorOptPredicate(NewStringInPredicate([]string{"abc"})), SyncIteratorOptStats(&keepStats))
 	defer keepIt.Close()
 	ccKeep := &ColumnChunkHelper{ColumnChunk: r.RowGroups()[0].ColumnChunks()[0]}
 	defer ccKeep.Close()
 	require.True(t, keepIt.keepColumnChunk(ccKeep))
-	require.Equal(t, int64(1), keepIP.InspectedColumnChunks)
-	require.Equal(t, int64(1), keepIP.KeptColumnChunks)
+	require.Equal(t, int64(1), keepStats.InspectedColumnChunks)
+	require.Equal(t, int64(1), keepStats.KeptColumnChunks)
 
-	skipIP := &InstrumentedPredicate{Pred: NewStringInPredicate([]string{"zzz"})}
-	skipIt := NewSyncIterator(context.TODO(), r.RowGroups(), 0, SyncIteratorOptPredicate(skipIP))
+	var skipStats PredicateStats
+	skipIt := NewSyncIterator(context.TODO(), r.RowGroups(), 0,
+		SyncIteratorOptPredicate(NewStringInPredicate([]string{"zzz"})), SyncIteratorOptStats(&skipStats))
 	defer skipIt.Close()
 	ccSkip := &ColumnChunkHelper{ColumnChunk: r.RowGroups()[0].ColumnChunks()[0]}
 	defer ccSkip.Close()
 	require.False(t, skipIt.keepColumnChunk(ccSkip))
-	require.Equal(t, int64(1), skipIP.InspectedColumnChunks)
-	require.Equal(t, int64(0), skipIP.KeptColumnChunks) // chunk skipped
+	require.Equal(t, int64(1), skipStats.InspectedColumnChunks)
+	require.Equal(t, int64(0), skipStats.KeptColumnChunks) // chunk skipped
 }
 
 func buildFile(t *testing.T, writeData func(w *parquet.Writer)) *parquet.File { //nolint:all

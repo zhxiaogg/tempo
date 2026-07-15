@@ -1548,14 +1548,24 @@ func BenchmarkIterators(b *testing.B) {
 	rgs := pf.RowGroups()
 	rgs = rgs[3:5]
 
-	var instrPred *parquetquery.InstrumentedPredicate
-	makeIterInternal := makeIterFunc(ctx, rgs, pf)
+	var stats *parquetquery.PredicateStats
 	makeIter := func(columnName string, predicate parquetquery.Predicate, selectAs string) parquetquery.Iterator {
-		instrPred = &parquetquery.InstrumentedPredicate{
-			Pred: predicate,
+		index, _, maxDef := parquetquery.GetColumnIndexByPath(pf, columnName)
+		if index == -1 {
+			panic("column not found in parquet file:" + columnName)
 		}
-
-		return makeIterInternal(columnName, predicate, selectAs, nil)
+		stats = &parquetquery.PredicateStats{}
+		opts := []parquetquery.SyncIteratorOpt{
+			parquetquery.SyncIteratorOptColumnName(columnName),
+			parquetquery.SyncIteratorOptPredicate(predicate),
+			parquetquery.SyncIteratorOptSelectAs(selectAs),
+			parquetquery.SyncIteratorOptMaxDefinitionLevel(maxDef),
+			parquetquery.SyncIteratorOptStats(stats),
+		}
+		if columnName != columnPathSpanID && columnName != columnPathTraceID {
+			opts = append(opts, parquetquery.SyncIteratorOptIntern())
+		}
+		return parquetquery.NewSyncIterator(ctx, rgs, index, opts...)
 	}
 
 	b.ResetTimer()
@@ -1573,14 +1583,14 @@ func BenchmarkIterators(b *testing.B) {
 			count++
 		}
 		iter.Close()
-		if instrPred != nil {
+		if stats != nil {
 			b.ReportMetric(float64(count), "count")
-			b.ReportMetric(float64(instrPred.InspectedColumnChunks), "stats_cc")
-			b.ReportMetric(float64(instrPred.KeptColumnChunks), "stats_cc_kept")
-			b.ReportMetric(float64(instrPred.InspectedPages), "stats_ip")
-			b.ReportMetric(float64(instrPred.KeptPages), "stats_ip_kept")
-			b.ReportMetric(float64(instrPred.InspectedValues), "stats_v")
-			b.ReportMetric(float64(instrPred.KeptValues), "stats_v_kept")
+			b.ReportMetric(float64(stats.InspectedColumnChunks), "stats_cc")
+			b.ReportMetric(float64(stats.KeptColumnChunks), "stats_cc_kept")
+			b.ReportMetric(float64(stats.InspectedPages), "stats_ip")
+			b.ReportMetric(float64(stats.KeptPages), "stats_ip_kept")
+			b.ReportMetric(float64(stats.InspectedValues), "stats_v")
+			b.ReportMetric(float64(stats.KeptValues), "stats_v_kept")
 		}
 	}
 }

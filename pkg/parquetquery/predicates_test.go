@@ -301,9 +301,9 @@ func testPredicate(t *testing.T, tc predicateTestCase) {
 	r, err := parquet.OpenFile(file, int64(buf.Len()))
 	require.NoError(t, err)
 
-	p := InstrumentedPredicate{Pred: tc.predicate}
-
-	i := NewSyncIterator(context.TODO(), r.RowGroups(), 0, SyncIteratorOptPredicate(&p))
+	var stats PredicateStats
+	i := NewSyncIterator(context.TODO(), r.RowGroups(), 0,
+		SyncIteratorOptPredicate(tc.predicate), SyncIteratorOptStats(&stats))
 	for {
 		res, err := i.Next()
 		require.NoError(t, err)
@@ -312,9 +312,9 @@ func testPredicate(t *testing.T, tc predicateTestCase) {
 		}
 	}
 
-	require.Equal(t, tc.keptChunks, int(p.KeptColumnChunks), "keptChunks")
-	require.Equal(t, tc.keptPages, int(p.KeptPages), "keptPages")
-	require.Equal(t, tc.keptValues, int(p.KeptValues), "keptValues")
+	require.Equal(t, tc.keptChunks, int(stats.KeptColumnChunks), "keptChunks")
+	require.Equal(t, tc.keptPages, int(stats.KeptPages), "keptPages")
+	require.Equal(t, tc.keptValues, int(stats.KeptValues), "keptValues")
 }
 
 func BenchmarkSubstringPredicate(b *testing.B) {

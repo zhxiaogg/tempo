@@ -341,43 +341,6 @@ func (p *OrPredicate) KeepRange(min, max pq.Value) bool {
 	return false
 }
 
-type InstrumentedPredicate struct {
-	Pred Predicate // Optional, if missing then just keeps metrics with no filtering
-	// predicateStats holds the chunk/page counters (InspectedColumnChunks,
-	// KeptColumnChunks, InspectedPages, KeptPages), incremented by the iterator's
-	// keep* helpers which take &predicateStats. Promoted fields keep the public API.
-	predicateStats
-	InspectedValues int64
-	KeptValues      int64
-}
-
-var _ Predicate = (*InstrumentedPredicate)(nil)
-
-func (p *InstrumentedPredicate) String() string {
-	if p.Pred == nil {
-		return fmt.Sprintf("InstrumentedPredicate{%d, nil}", p.InspectedValues)
-	}
-	return fmt.Sprintf("InstrumentedPredicate{%d, %s}", p.InspectedValues, p.Pred)
-}
-
-func (p *InstrumentedPredicate) KeepValue(v pq.Value) bool {
-	p.InspectedValues++
-
-	if p.Pred == nil || p.Pred.KeepValue(v) {
-		p.KeptValues++
-		return true
-	}
-
-	return false
-}
-
-func (p *InstrumentedPredicate) KeepRange(min, max pq.Value) bool {
-	if p.Pred == nil {
-		return true
-	}
-	return p.Pred.KeepRange(min, max)
-}
-
 type SkipNilsPredicate struct{}
 
 var _ Predicate = (*SkipNilsPredicate)(nil)
