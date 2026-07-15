@@ -487,11 +487,6 @@ type SyncIterator struct {
 	pred    Predicate
 	stats   *predicateStats
 	sampler Sampler
-	// neverSkip disables predicate-based chunk/page skipping. Set for the nil
-	// iterator, which detects the ABSENCE of a matching value per scope and so must
-	// scan every chunk/page — including via the shared seek path (seekRowGroup /
-	// seekPages), which NilSyncIterator.SeekTo reuses.
-	neverSkip bool
 
 	// Status
 	span            trace.Span
@@ -645,11 +640,11 @@ func (c *SyncIterator) Next() (*IteratorResult, error) {
 // or equal to the given row number (and based on the given definition level)
 func (c *SyncIterator) SeekTo(to RowNumber, definitionLevel int) (*IteratorResult, error) {
 	for {
-		if done := c.seekRowGroup(to, definitionLevel); done {
+		if done := c.seekRowGroup(to, definitionLevel, true); done {
 			return nil, nil
 		}
 
-		done, err := c.seekPages(to, definitionLevel)
+		done, err := c.seekPages(to, definitionLevel, true)
 		if err != nil {
 			return nil, err
 		}
@@ -697,7 +692,7 @@ func (c *SyncIterator) popRowGroup() (pq.RowGroup, RowNumber, RowNumber) {
 
 // seekRowGroup skips ahead to the row group that could contain the value at the
 // desired row number. Does nothing if the current row group is already the correct one.
-func (c *SyncIterator) seekRowGroup(seekTo RowNumber, definitionLevel int) (done bool) {
+func (c *SyncIterator) seekRowGroup(seekTo RowNumber, definitionLevel int, prune bool) (done bool) {
 	if c.currRowGroup != nil && CompareRowNumbers(definitionLevel, seekTo, c.currRowGroupMax) >= 0 {
 		// Done with this row group
 		c.closeCurrRowGroup()
@@ -715,7 +710,7 @@ func (c *SyncIterator) seekRowGroup(seekTo RowNumber, definitionLevel int) (done
 		}
 
 		cc := &ColumnChunkHelper{ColumnChunk: rg.ColumnChunks()[c.column]}
-		if c.filter != nil && !c.neverSkip && !c.keepColumnChunk(cc) {
+		if prune && !c.keepColumnChunk(cc) {
 			cc.Close()
 			continue
 		}
@@ -729,7 +724,7 @@ func (c *SyncIterator) seekRowGroup(seekTo RowNumber, definitionLevel int) (done
 
 // seekPages skips ahead in the current row group to the page that could contain the value at
 // the desired row number. Does nothing if the current page is already the correct one.
-func (c *SyncIterator) seekPages(seekTo RowNumber, definitionLevel int) (done bool, err error) {
+func (c *SyncIterator) seekPages(seekTo RowNumber, definitionLevel int, prune bool) (done bool, err error) {
 	if c.currPage != nil && CompareRowNumbers(definitionLevel, seekTo, c.currPageMax) >= 0 {
 		// Value not in this page
 		c.setPage(nil)
@@ -776,7 +771,7 @@ func (c *SyncIterator) seekPages(seekTo RowNumber, definitionLevel int) (done bo
 			}
 
 			// Skip based on filter?
-			if c.filter != nil && !c.neverSkip && !keepPage(c.pred, pg, c.stats) {
+			if prune && c.filter != nil && !keepPage(c.pred, pg, c.stats) {
 				c.curr.Skip(pg.NumRows())
 				pq.Release(pg)
 				continue
@@ -880,7 +875,7 @@ func (c *SyncIterator) next() (RowNumber, *pq.Value, error) {
 			}
 
 			cc := &ColumnChunkHelper{ColumnChunk: rg.ColumnChunks()[c.column]}
-			if c.filter != nil && !c.neverSkip && !c.keepColumnChunk(cc) {
+			if !c.keepColumnChunk(cc) {
 				cc.Close()
 				continue
 			}
@@ -898,7 +893,7 @@ func (c *SyncIterator) next() (RowNumber, *pq.Value, error) {
 				c.closeCurrRowGroup()
 				continue
 			}
-			if c.filter != nil && !c.neverSkip && !keepPage(c.pred, pg, c.stats) {
+			if c.filter != nil && !keepPage(c.pred, pg, c.stats) {
 				// This page filtered out
 				c.curr.Skip(pg.NumRows())
 				pq.Release(pg)
@@ -1021,11 +1016,13 @@ func (c *SyncIterator) setPage(pg pq.Page) {
 }
 
 // dictFastPathEligible reports whether the dictionary-index fast path may be used.
-// It requires a real predicate (nothing to resolve otherwise), no InstrumentedPredicate
-// wrapper (whose per-value counters the fast path would bypass — c.stats!=nil signals
-// one), and that this is not the absence-detecting nil iterator.
+// It requires a real predicate (nothing to resolve otherwise) and no InstrumentedPredicate
+// wrapper (whose per-value counters the fast path would bypass — c.stats!=nil signals one).
+// The absence-detecting nil iterator never reaches this: it has its own non-pruning next()
+// and drives the shared seek path with prune=false, so keepColumnChunk (the only place the
+// bitmap is built) is never called for it.
 func (c *SyncIterator) dictFastPathEligible() bool {
-	return !c.indexReaderDisabled && c.filter != nil && c.stats == nil && !c.neverSkip
+	return !c.indexReaderDisabled && c.filter != nil && c.stats == nil
 }
 
 // indexReaderFor returns a fast-path reader for pg, or nil to fall back to the per-row
