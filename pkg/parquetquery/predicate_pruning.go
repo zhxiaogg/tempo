@@ -1,6 +1,8 @@
 package parquetquery
 
 import (
+	"slices"
+
 	pq "github.com/parquet-go/parquet-go"
 )
 
@@ -27,6 +29,7 @@ func predicateNullValue() pq.Value { return pq.Value{} }
 // range test via KeepRange, and a null-count test via KeepValue(null). Counts into
 // c.stats when set.
 func (c *SyncIterator) keepColumnChunk(cc *ColumnChunkHelper) (keep bool) {
+	c.indexReaderMatches = nil // cleared each chunk; set below only for the dict fast path
 	if c.filter == nil {
 		return true // no predicate: keep everything
 	}
@@ -44,6 +47,13 @@ func (c *SyncIterator) keepColumnChunk(cc *ColumnChunkHelper) (keep bool) {
 	if dict := cc.Dictionary(); dict != nil {
 		// Dict-encoded (string) chunk: any present value that matches lives in the
 		// dictionary; null rows are decided by keepNull since nulls are not stored there.
+		if !keepNull {
+			// Null-rejecting predicate: resolve the per-index keep bitmap once here and
+			// reuse it for every page (indexReaderFor), matching rows by dictionary index
+			// instead of a per-row KeepValue. Null rows can't match, so none are missed.
+			c.indexReaderMatches = dictionaryKeepBitmap(dict, c.filter.KeepValue)
+			return slices.Contains(c.indexReaderMatches, true)
+		}
 		if keepDictionary(dict, c.filter.KeepValue) {
 			return true
 		}
@@ -117,4 +127,15 @@ func keepDictionary(dict pq.Dictionary, keepValue func(pq.Value) bool) bool {
 		}
 	}
 	return false
+}
+
+// dictionaryKeepBitmap resolves keep against every distinct dictionary value once,
+// returning a bitmap where entry i is true iff dict.Index(i) matches. Paid once per
+// column chunk rather than once per row.
+func dictionaryKeepBitmap(dict pq.Dictionary, keep func(pq.Value) bool) []bool {
+	out := make([]bool, dict.Len())
+	for i := range out {
+		out[i] = keep(dict.Index(int32(i)))
+	}
+	return out
 }
