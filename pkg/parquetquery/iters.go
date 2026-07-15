@@ -1068,17 +1068,6 @@ func (c *SyncIterator) closeCurrRowGroup() {
 	c.setPage(nil)
 }
 
-// dictionaryKeepBitmap resolves keep against every distinct dictionary value once,
-// returning a bitmap where entry i is true iff dict.Index(i) matches. Paid once per
-// column chunk rather than once per row.
-func dictionaryKeepBitmap(dict pq.Dictionary, keep func(pq.Value) bool) []bool {
-	out := make([]bool, dict.Len())
-	for i := range out {
-		out[i] = keep(dict.Index(int32(i)))
-	}
-	return out
-}
-
 // maxByte returns the largest byte in b, or 0 for empty b. On a data page the max
 // definition level equals the level of a present (non-null) leaf value.
 func maxByte(b []byte) byte {

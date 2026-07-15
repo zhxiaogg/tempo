@@ -125,3 +125,24 @@ func keepDictionary(dict pq.Dictionary, keepValue func(pq.Value) bool) bool {
 	}
 	return false
 }
+
+// dictionaryKeepBitmap resolves keep against every distinct dictionary value once,
+// returning a bitmap where entry i is true iff dict.Index(i) matches. Paid once per
+// column chunk rather than once per row.
+func dictionaryKeepBitmap(dict pq.Dictionary, keep func(pq.Value) bool) []bool {
+	out := make([]bool, dict.Len())
+	for i := range out {
+		out[i] = keep(dict.Index(int32(i)))
+	}
+	return out
+}
+
+// anyTrue reports whether any entry in b is true.
+func anyTrue(b []bool) bool {
+	for _, v := range b {
+		if v {
+			return true
+		}
+	}
+	return false
+}
