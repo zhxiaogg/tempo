@@ -771,7 +771,7 @@ func (c *SyncIterator) seekPages(seekTo RowNumber, definitionLevel int, prune bo
 			}
 
 			// Skip based on filter?
-			if prune && c.filter != nil && !keepPage(c.pred, pg, c.stats) {
+			if prune && c.filter != nil && !c.keepPage(pg) {
 				c.curr.Skip(pg.NumRows())
 				pq.Release(pg)
 				continue
@@ -893,7 +893,7 @@ func (c *SyncIterator) next() (RowNumber, *pq.Value, error) {
 				c.closeCurrRowGroup()
 				continue
 			}
-			if c.filter != nil && !keepPage(c.pred, pg, c.stats) {
+			if c.filter != nil && !c.keepPage(pg) {
 				// This page filtered out
 				c.curr.Skip(pg.NumRows())
 				pq.Release(pg)

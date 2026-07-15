@@ -111,9 +111,12 @@ func TestKeepHelpersMatchValueOracle(t *testing.T) {
 
 			oracle := oracleKeep(t, r, tc.predicate)
 
+			it := NewSyncIterator(context.TODO(), r.RowGroups(), 0, SyncIteratorOptPredicate(tc.predicate))
+			defer it.Close()
+
 			cc := &ColumnChunkHelper{ColumnChunk: r.RowGroups()[0].ColumnChunks()[0]}
 			defer cc.Close()
-			require.Equal(t, oracle, columnChunkMatches(tc.predicate, cc, nil), "columnChunkMatches vs oracle")
+			require.Equal(t, oracle, it.keepColumnChunk(cc), "keepColumnChunk vs oracle")
 
 			ccPage := &ColumnChunkHelper{ColumnChunk: r.RowGroups()[0].ColumnChunks()[0]}
 			defer ccPage.Close()
@@ -125,7 +128,7 @@ func TestKeepHelpersMatchValueOracle(t *testing.T) {
 			// with no usable page-level range (e.g. substring/regex), whose tight skip
 			// happens at the chunk level (dictionary) instead.
 			if oracle {
-				require.True(t, keepPage(tc.predicate, pg, nil), "keepPage must keep a matching page")
+				require.True(t, it.keepPage(pg), "keepPage must keep a matching page")
 			}
 		})
 	}
@@ -135,17 +138,26 @@ func TestKeepStatsCounters(t *testing.T) {
 	r := buildFile(t, func(w *parquet.Writer) { //nolint:all
 		require.NoError(t, w.Write(&testDictString{"abc"}))
 	})
-	stats := &predicateStats{}
-	cc := &ColumnChunkHelper{ColumnChunk: r.RowGroups()[0].ColumnChunks()[0]}
-	defer cc.Close()
 
-	columnChunkMatches(NewStringInPredicate([]string{"abc"}), cc, stats)
-	require.Equal(t, int64(1), stats.InspectedColumnChunks)
-	require.Equal(t, int64(1), stats.KeptColumnChunks)
+	// An InstrumentedPredicate sets c.stats, so keepColumnChunk counts into it. It also
+	// forces the non-reuse (any-match) path, which is where chunk pruning is counted.
+	keepIP := &InstrumentedPredicate{Pred: NewStringInPredicate([]string{"abc"})}
+	keepIt := NewSyncIterator(context.TODO(), r.RowGroups(), 0, SyncIteratorOptPredicate(keepIP))
+	defer keepIt.Close()
+	ccKeep := &ColumnChunkHelper{ColumnChunk: r.RowGroups()[0].ColumnChunks()[0]}
+	defer ccKeep.Close()
+	require.True(t, keepIt.keepColumnChunk(ccKeep))
+	require.Equal(t, int64(1), keepIP.InspectedColumnChunks)
+	require.Equal(t, int64(1), keepIP.KeptColumnChunks)
 
-	columnChunkMatches(NewStringInPredicate([]string{"zzz"}), cc, stats)
-	require.Equal(t, int64(2), stats.InspectedColumnChunks)
-	require.Equal(t, int64(1), stats.KeptColumnChunks) // second chunk skipped
+	skipIP := &InstrumentedPredicate{Pred: NewStringInPredicate([]string{"zzz"})}
+	skipIt := NewSyncIterator(context.TODO(), r.RowGroups(), 0, SyncIteratorOptPredicate(skipIP))
+	defer skipIt.Close()
+	ccSkip := &ColumnChunkHelper{ColumnChunk: r.RowGroups()[0].ColumnChunks()[0]}
+	defer ccSkip.Close()
+	require.False(t, skipIt.keepColumnChunk(ccSkip))
+	require.Equal(t, int64(1), skipIP.InspectedColumnChunks)
+	require.Equal(t, int64(0), skipIP.KeptColumnChunks) // chunk skipped
 }
 
 func buildFile(t *testing.T, writeData func(w *parquet.Writer)) *parquet.File { //nolint:all

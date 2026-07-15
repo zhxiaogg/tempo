@@ -1,11 +1,15 @@
 package parquetquery
 
-import pq "github.com/parquet-go/parquet-go"
+import (
+	"slices"
 
-// predicateStats counts the chunk/page filtering decisions made by the generic
-// keep* helpers. It is optional (nil-safe) and, when supplied, lets callers such
-// as InstrumentedPredicate report inspected/kept counts without the Predicate
-// interface needing chunk/page methods.
+	pq "github.com/parquet-go/parquet-go"
+)
+
+// predicateStats counts the chunk/page pruning decisions made by keepColumnChunk /
+// keepPage. It is optional (nil-safe) and, when supplied via an InstrumentedPredicate,
+// lets callers report inspected/kept counts without the Predicate interface needing
+// chunk/page methods.
 type predicateStats struct {
 	InspectedColumnChunks int64
 	KeptColumnChunks      int64
@@ -19,31 +23,39 @@ type predicateStats struct {
 // with per-row evaluation.
 func predicateNullValue() pq.Value { return pq.Value{} }
 
-// columnChunkMatches reports whether any value in the column chunk can match pred.
-// It combines a dictionary any-match for dict-encoded (string) columns, a column-index
-// range test via KeepRange, and a null-count test via KeepValue(null). Stats-aware.
-func columnChunkMatches(pred Predicate, cc *ColumnChunkHelper, stats *predicateStats) bool {
-	if stats != nil {
-		stats.InspectedColumnChunks++
+// keepColumnChunk reports whether any value in cc can match c.pred and, as a side
+// effect, resolves the current chunk's dictionary fast-path bitmap (c.indexReaderMatches).
+// One dictionary scan serves both: on the eligible null-rejecting dict path the per-index
+// keep bitmap is built once here and reused by every page (indexReaderFor); otherwise a
+// short-circuiting any-match is used and no bitmap is cached. The decision combines a
+// dictionary match for dict-encoded (string) columns, a column-index range test via
+// KeepRange, and a null-count test via KeepValue(null). Counts into c.stats when set.
+func (c *SyncIterator) keepColumnChunk(cc *ColumnChunkHelper) (keep bool) {
+	c.indexReaderMatches = nil
+	if c.filter == nil {
+		return true // no predicate: keep everything, no bitmap
 	}
-	keep := keepColumnChunkInner(pred, cc)
-	if keep && stats != nil {
-		stats.KeptColumnChunks++
+	if c.stats != nil {
+		c.stats.InspectedColumnChunks++
+		defer func() {
+			if keep {
+				c.stats.KeptColumnChunks++
+			}
+		}()
 	}
-	return keep
-}
 
-func keepColumnChunkInner(pred Predicate, cc *ColumnChunkHelper) bool {
-	if pred == nil {
-		return true // no predicate: keep everything
-	}
-	keepNull := pred.KeepValue(predicateNullValue())
+	keepNull := c.pred.KeepValue(predicateNullValue())
 
-	if d := cc.Dictionary(); d != nil {
+	if dict := cc.Dictionary(); dict != nil {
 		// Dict-encoded (string) chunk: any present value that matches lives in the
-		// dictionary; null rows are decided by keepNull since nulls are not stored
-		// in the dictionary.
-		if keepDictionary(d, pred.KeepValue) {
+		// dictionary; null rows are decided by keepNull since nulls are not stored there.
+		if c.dictFastPathEligible() && !keepNull {
+			// Reuse path: build the per-index keep bitmap once (dictionaries are chunk-
+			// scoped) and derive the any-match from it. Every page reuses this bitmap.
+			c.indexReaderMatches = dictionaryKeepBitmap(dict, c.pred.KeepValue)
+			return slices.Contains(c.indexReaderMatches, true)
+		}
+		if keepDictionary(dict, c.pred.KeepValue) {
 			return true
 		}
 		return keepNull && chunkHasNulls(cc)
@@ -61,7 +73,7 @@ func keepColumnChunkInner(pred Predicate, cc *ColumnChunkHelper) bool {
 			}
 			continue
 		}
-		if pred.KeepRange(ci.MinValue(i), ci.MaxValue(i)) {
+		if c.pred.KeepRange(ci.MinValue(i), ci.MaxValue(i)) {
 			return true
 		}
 		if keepNull && ci.NullCount(i) > 0 {
@@ -69,6 +81,33 @@ func keepColumnChunkInner(pred Predicate, cc *ColumnChunkHelper) bool {
 		}
 	}
 	return false
+}
+
+// keepPage reports whether any value in pg can match c.pred, combining a page-bounds
+// range test via KeepRange with a null test via KeepValue(null). Counts into c.stats
+// when set. The caller guards c.filter != nil, so c.pred is always non-nil here.
+func (c *SyncIterator) keepPage(pg pq.Page) (keep bool) {
+	if c.stats != nil {
+		c.stats.InspectedPages++
+		defer func() {
+			if keep {
+				c.stats.KeptPages++
+			}
+		}()
+	}
+
+	keepNull := c.pred.KeepValue(predicateNullValue())
+	if keepNull && pg.NumNulls() > 0 {
+		return true
+	}
+	if pg.NumValues()-pg.NumNulls() <= 0 {
+		// No present values on this page; only the null decision (handled above) applies.
+		return false
+	}
+	if min, max, ok := pg.Bounds(); ok {
+		return c.pred.KeepRange(min, max)
+	}
+	return true // no bounds recorded: cannot skip
 }
 
 func chunkHasNulls(cc *ColumnChunkHelper) bool {
@@ -82,37 +121,6 @@ func chunkHasNulls(cc *ColumnChunkHelper) bool {
 		}
 	}
 	return false
-}
-
-// keepPage reports whether any value in the page can match pred, combining a
-// page-bounds range test via KeepRange with a null test via KeepValue(null).
-func keepPage(pred Predicate, pg pq.Page, stats *predicateStats) bool {
-	if stats != nil {
-		stats.InspectedPages++
-	}
-	keep := keepPageInner(pred, pg)
-	if keep && stats != nil {
-		stats.KeptPages++
-	}
-	return keep
-}
-
-func keepPageInner(pred Predicate, pg pq.Page) bool {
-	if pred == nil {
-		return true // no predicate: keep everything
-	}
-	keepNull := pred.KeepValue(predicateNullValue())
-	if keepNull && pg.NumNulls() > 0 {
-		return true
-	}
-	if pg.NumValues()-pg.NumNulls() <= 0 {
-		// No present values on this page; only the null decision (handled above) applies.
-		return false
-	}
-	if min, max, ok := pg.Bounds(); ok {
-		return pred.KeepRange(min, max)
-	}
-	return true // no bounds recorded: cannot skip
 }
 
 // keepDictionary reports whether any dictionary entry matches keepValue.
@@ -134,37 +142,4 @@ func dictionaryKeepBitmap(dict pq.Dictionary, keep func(pq.Value) bool) []bool {
 		out[i] = keep(dict.Index(int32(i)))
 	}
 	return out
-}
-
-// anyTrue reports whether any entry in b is true.
-func anyTrue(b []bool) bool {
-	for _, v := range b {
-		if v {
-			return true
-		}
-	}
-	return false
-}
-
-// keepColumnChunk decides whether to keep cc and, as a side effect, resolves the
-// current chunk's dictionary fast-path bitmap (c.indexReaderMatches). On the eligible
-// null-rejecting dict path the bitmap is built once here and reused by every page
-// (indexReaderFor), so the dictionary is scanned once per chunk rather than twice.
-func (c *SyncIterator) keepColumnChunk(cc *ColumnChunkHelper) bool {
-	if c.filter == nil {
-		return true // no predicate: keep everything, no bitmap
-	}
-	// Reuse path: build the per-index keep bitmap once and derive the any-match from it.
-	// Eligibility already implies c.stats == nil (no InstrumentedPredicate), so there is
-	// nothing to count here.
-	if c.dictFastPathEligible() {
-		if dict := cc.Dictionary(); dict != nil && !c.pred.KeepValue(predicateNullValue()) {
-			c.indexReaderMatches = dictionaryKeepBitmap(dict, c.pred.KeepValue)
-			return anyTrue(c.indexReaderMatches)
-		}
-	}
-	// Non-reuse path (Instrumented wrapper, keep-null predicate, or non-dict column):
-	// no cached bitmap; keep the short-circuiting any-match + stats.
-	c.indexReaderMatches = nil
-	return columnChunkMatches(c.pred, cc, c.stats)
 }
