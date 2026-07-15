@@ -19,11 +19,10 @@ type predicateStats struct {
 // with per-row evaluation.
 func predicateNullValue() pq.Value { return pq.Value{} }
 
-// keepColumnChunk reports whether any value in the column chunk can match pred.
-// It unifies the chunk-level skipping formerly duplicated across every predicate:
-// a dictionary any-match for dict-encoded (string) columns, a column-index range
-// test via KeepRange, and a null-count test via KeepValue(null).
-func keepColumnChunk(pred Predicate, cc *ColumnChunkHelper, stats *predicateStats) bool {
+// columnChunkMatches reports whether any value in the column chunk can match pred.
+// It combines a dictionary any-match for dict-encoded (string) columns, a column-index
+// range test via KeepRange, and a null-count test via KeepValue(null). Stats-aware.
+func columnChunkMatches(pred Predicate, cc *ColumnChunkHelper, stats *predicateStats) bool {
 	if stats != nil {
 		stats.InspectedColumnChunks++
 	}
@@ -145,4 +144,27 @@ func anyTrue(b []bool) bool {
 		}
 	}
 	return false
+}
+
+// keepColumnChunk decides whether to keep cc and, as a side effect, resolves the
+// current chunk's dictionary fast-path bitmap (c.indexReaderMatches). On the eligible
+// null-rejecting dict path the bitmap is built once here and reused by every page
+// (indexReaderFor), so the dictionary is scanned once per chunk rather than twice.
+func (c *SyncIterator) keepColumnChunk(cc *ColumnChunkHelper) bool {
+	if c.filter == nil {
+		return true // no predicate: keep everything, no bitmap
+	}
+	// Reuse path: build the per-index keep bitmap once and derive the any-match from it.
+	// Eligibility already implies c.stats == nil (no InstrumentedPredicate), so there is
+	// nothing to count here.
+	if c.dictFastPathEligible() {
+		if dict := cc.Dictionary(); dict != nil && !c.pred.KeepValue(predicateNullValue()) {
+			c.indexReaderMatches = dictionaryKeepBitmap(dict, c.pred.KeepValue)
+			return anyTrue(c.indexReaderMatches)
+		}
+	}
+	// Non-reuse path (Instrumented wrapper, keep-null predicate, or non-dict column):
+	// no cached bitmap; keep the short-circuiting any-match + stats.
+	c.indexReaderMatches = nil
+	return columnChunkMatches(c.pred, cc, c.stats)
 }

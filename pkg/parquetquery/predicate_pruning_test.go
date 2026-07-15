@@ -113,7 +113,7 @@ func TestKeepHelpersMatchValueOracle(t *testing.T) {
 
 			cc := &ColumnChunkHelper{ColumnChunk: r.RowGroups()[0].ColumnChunks()[0]}
 			defer cc.Close()
-			require.Equal(t, oracle, keepColumnChunk(tc.predicate, cc, nil), "keepColumnChunk vs oracle")
+			require.Equal(t, oracle, columnChunkMatches(tc.predicate, cc, nil), "columnChunkMatches vs oracle")
 
 			ccPage := &ColumnChunkHelper{ColumnChunk: r.RowGroups()[0].ColumnChunks()[0]}
 			defer ccPage.Close()
@@ -139,11 +139,11 @@ func TestKeepStatsCounters(t *testing.T) {
 	cc := &ColumnChunkHelper{ColumnChunk: r.RowGroups()[0].ColumnChunks()[0]}
 	defer cc.Close()
 
-	keepColumnChunk(NewStringInPredicate([]string{"abc"}), cc, stats)
+	columnChunkMatches(NewStringInPredicate([]string{"abc"}), cc, stats)
 	require.Equal(t, int64(1), stats.InspectedColumnChunks)
 	require.Equal(t, int64(1), stats.KeptColumnChunks)
 
-	keepColumnChunk(NewStringInPredicate([]string{"zzz"}), cc, stats)
+	columnChunkMatches(NewStringInPredicate([]string{"zzz"}), cc, stats)
 	require.Equal(t, int64(2), stats.InspectedColumnChunks)
 	require.Equal(t, int64(1), stats.KeptColumnChunks) // second chunk skipped
 }
@@ -178,4 +178,51 @@ func oracleKeep(t *testing.T, r *parquet.File, pred Predicate) bool {
 			}
 		}
 	}
+}
+
+// countingPredicate wraps a predicate and counts KeepValue calls. It is NOT an
+// *InstrumentedPredicate, so the dictionary fast path stays enabled.
+type countingPredicate struct {
+	inner      Predicate
+	keepValueN int
+}
+
+func (p *countingPredicate) String() string { return p.inner.String() }
+func (p *countingPredicate) KeepValue(v parquet.Value) bool {
+	p.keepValueN++
+	return p.inner.KeepValue(v)
+}
+func (p *countingPredicate) KeepRange(a, b parquet.Value) bool { return p.inner.KeepRange(a, b) }
+
+// TestKeepColumnChunkResolvesBitmapOnce asserts the eligible null-rejecting dict path
+// scans the dictionary exactly once (bitmap build + one null probe) and never falls
+// back to a per-row KeepValue, i.e. the old double scan is gone.
+func TestKeepColumnChunkResolvesBitmapOnce(t *testing.T) {
+	r := buildFile(t, func(w *parquet.Writer) { //nolint:all
+		for _, s := range []string{"a", "b", "c", "a", "b", "c"} { // 3 distinct dict entries
+			require.NoError(t, w.Write(&testDictString{s}))
+		}
+	})
+	pred := &countingPredicate{inner: NewStringEqualPredicate("b")}
+	it := NewSyncIterator(context.TODO(), r.RowGroups(), 0,
+		SyncIteratorOptPredicate(pred), SyncIteratorOptSelectAs("v"))
+	defer it.Close()
+
+	var n int
+	for {
+		res, err := it.Next()
+		require.NoError(t, err)
+		if res == nil {
+			break
+		}
+		n++
+	}
+
+	require.Equal(t, 2, n, "two 'b' rows match")
+	require.Positive(t, it.indexReaderPagesUsed, "fast path should serve the page")
+	// The 3-entry dictionary is scanned exactly once (bitmap build), plus two cheap
+	// null probes: one at chunk level (keepColumnChunk) and one at page level
+	// (keepPage). No per-row KeepValue (the fast path matches by index) and, crucially,
+	// no second dictionary scan (the old any-match + bitmap double scan is gone).
+	require.Equal(t, 5, pred.keepValueN, "one dict scan (3) + chunk null probe (1) + page null probe (1)")
 }

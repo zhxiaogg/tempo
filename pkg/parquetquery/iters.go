@@ -516,8 +516,7 @@ type SyncIterator struct {
 	// keep bitmap indexed by dictionary index; each row is then matched by its integer
 	// index instead of materializing the value and running KeepValue per row.
 	indexReaderDisabled  bool              // test-only: force the per-row path
-	indexReaderPagesUsed int              // pages served via the fast path (observability/tests)
-	indexReaderChecked   bool              // keep bitmap resolved for the current chunk?
+	indexReaderPagesUsed int               // pages served via the fast path (observability/tests)
 	indexReaderMatches   []bool            // keep bitmap by dictionary index; nil => no pushdown for this chunk
 	indexReader          *indexValueReader // current page's reader; nil on the per-row path
 
@@ -716,7 +715,7 @@ func (c *SyncIterator) seekRowGroup(seekTo RowNumber, definitionLevel int) (done
 		}
 
 		cc := &ColumnChunkHelper{ColumnChunk: rg.ColumnChunks()[c.column]}
-		if c.filter != nil && !c.neverSkip && !keepColumnChunk(c.pred, cc, c.stats) {
+		if c.filter != nil && !c.neverSkip && !c.keepColumnChunk(cc) {
 			cc.Close()
 			continue
 		}
@@ -881,7 +880,7 @@ func (c *SyncIterator) next() (RowNumber, *pq.Value, error) {
 			}
 
 			cc := &ColumnChunkHelper{ColumnChunk: rg.ColumnChunks()[c.column]}
-			if c.filter != nil && !c.neverSkip && !keepColumnChunk(c.pred, cc, c.stats) {
+			if c.filter != nil && !c.neverSkip && !c.keepColumnChunk(cc) {
 				cc.Close()
 				continue
 			}
@@ -974,10 +973,8 @@ func (c *SyncIterator) setRowGroup(rg pq.RowGroup, min, max RowNumber, cc *Colum
 	c.currRowGroupMin = min
 	c.currRowGroupMax = max
 	c.currChunk = cc
-
-	// New chunk => new dictionary; the keep bitmap must be re-resolved.
-	c.indexReaderChecked = false
-	c.indexReaderMatches = nil
+	// The keep bitmap is owned by keepColumnChunk, which runs at every chunk entry
+	// before setRowGroup; do not reset it here or the freshly-resolved bitmap is lost.
 }
 
 func (c *SyncIterator) setPage(pg pq.Page) {
@@ -1031,24 +1028,10 @@ func (c *SyncIterator) dictFastPathEligible() bool {
 	return !c.indexReaderDisabled && c.filter != nil && c.stats == nil && !c.neverSkip
 }
 
-// indexReaderFor returns a fast-path reader for pg, or nil to fall back to the
-// per-row path. The keep bitmap is resolved once per chunk (dictionaries are
-// chunk-scoped) and reused across pages. Predicates that keep nulls fall back to
-// per-row (matches left nil), so the walker never has to emit a null value.
+// indexReaderFor returns a fast-path reader for pg, or nil to fall back to the per-row
+// path. The keep bitmap was resolved once at chunk entry by keepColumnChunk and cached
+// in c.indexReaderMatches (nil => per-row path for this chunk).
 func (c *SyncIterator) indexReaderFor(pg pq.Page) *indexValueReader {
-	if !c.dictFastPathEligible() {
-		return nil
-	}
-	dict := pg.Dictionary()
-	if dict == nil {
-		return nil
-	}
-	if !c.indexReaderChecked {
-		c.indexReaderChecked = true
-		if !c.pred.KeepValue(predicateNullValue()) {
-			c.indexReaderMatches = dictionaryKeepBitmap(dict, c.pred.KeepValue)
-		}
-	}
 	if c.indexReaderMatches == nil {
 		return nil
 	}
