@@ -32,6 +32,12 @@ For recent-data queries, use `tempo_live_store_query_inspected_bytes_total` to i
 
 For PromQL examples and alerting guidance, refer to [Monitor query I/O and span timestamp distance](/docs/tempo/<TEMPO_VERSION>/operations/monitor/query-io-and-timestamp-distance/).
 
+#### Query frontend returned bytes
+
+Use `tempo_query_frontend_bytes_returned_total` to monitor how many bytes of the response payload the query frontend returns to clients.
+This counter is emitted per `tenant` and `op`; currently only trace-by-id (`op="traces"`) populates it.
+Unlike `tempo_query_frontend_bytes_inspected_total`, it reflects the size of the trace actually returned rather than bytes read from storage, and is unaffected by cache hits.
+
 ### Logs
 
 Tempo emits logs in the `key=value` ([logfmt](https://brandur.org/logfmt)) format.
