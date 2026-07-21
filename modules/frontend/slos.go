@@ -73,6 +73,17 @@ var (
 	searchInspectedBytes    = queryInspectedBytes.MustCurryWith(prometheus.Labels{"op": searchOp})
 	metadataInspectedBytes  = queryInspectedBytes.MustCurryWith(prometheus.Labels{"op": metadataOp})
 	metricsInspectedBytes   = queryInspectedBytes.MustCurryWith(prometheus.Labels{"op": metricsOp})
+
+	// queryReturnedBytes tracks the size of the payload actually returned to
+	// the client, complementing queryInspectedBytes (which tracks storage
+	// bytes read). Currently only populated for the trace-by-id op.
+	queryReturnedBytes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "tempo",
+		Name:      "query_frontend_bytes_returned_total",
+		Help:      "Bytes of the response payload returned to the client per tenant",
+	}, []string{"tenant", "op"})
+
+	traceByIDReturnedBytes = queryReturnedBytes.MustCurryWith(prometheus.Labels{"op": traceByIDOp})
 )
 
 type (

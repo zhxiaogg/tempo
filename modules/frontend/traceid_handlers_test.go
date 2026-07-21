@@ -20,6 +20,7 @@ import (
 	"github.com/grafana/tempo/pkg/model/trace"
 	"github.com/grafana/tempo/pkg/tempopb"
 	"github.com/grafana/tempo/pkg/util/test"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -634,4 +635,45 @@ func TestTraceIDHandlerV2ReturnedBytes(t *testing.T) {
 	// response must reflect the single deduped copy, not the sum of both shards.
 	require.Equal(t, int64(actualResp.Trace.Size()), actualResp.Metrics.AdditionalMetrics[tempopb.AdditionalMetricReturnedBytes])
 	require.Less(t, actualResp.Metrics.AdditionalMetrics[tempopb.AdditionalMetricReturnedBytes], int64(2*testTrace.Size()))
+}
+
+func TestTraceIDHandlerV2ReturnedBytesCounter(t *testing.T) {
+	testTrace := test.MakeTrace(2, []byte{0x29, 0x2a})
+
+	next := pipeline.RoundTripperFunc(func(_ pipeline.Request) (*http.Response, error) {
+		resBytes, err := proto.Marshal(&tempopb.TraceByIDResponse{
+			Trace:   testTrace,
+			Metrics: &tempopb.TraceByIDMetrics{},
+		})
+		require.NoError(t, err)
+		return &http.Response{
+			Body:       io.NopCloser(bytes.NewReader(resBytes)),
+			StatusCode: 200,
+			Header:     map[string][]string{"Content-Type": {"application/protobuf"}},
+		}, nil
+	})
+
+	f := frontendWithSettings(t, next, nil, config, nil)
+
+	tenant := "returned-bytes-counter-tenant"
+	before := testutil.ToFloat64(traceByIDReturnedBytes.WithLabelValues(tenant))
+
+	req := httptest.NewRequest("GET", "/api/v2/traces/1234", nil)
+	ctx := user.InjectOrgID(req.Context(), tenant)
+	req = req.WithContext(ctx)
+	req = mux.SetURLVars(req, map[string]string{"traceID": "1234"})
+	req.Header.Set("Accept", "application/protobuf")
+
+	httpResp := httptest.NewRecorder()
+	f.TraceByIDHandlerV2.ServeHTTP(httpResp, req)
+	resp := httpResp.Result()
+	require.Equal(t, 200, resp.StatusCode)
+
+	actualResp := &tempopb.TraceByIDResponse{}
+	bytesTrace, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, proto.Unmarshal(bytesTrace, actualResp))
+
+	after := testutil.ToFloat64(traceByIDReturnedBytes.WithLabelValues(tenant))
+	require.Equal(t, float64(actualResp.Metrics.AdditionalMetrics[tempopb.AdditionalMetricReturnedBytes]), after-before)
 }

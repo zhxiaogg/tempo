@@ -71,6 +71,7 @@ func newTraceIDHandler(cfg Config, next pipeline.AsyncRoundTripper[combiner.Pipe
 			returnedBytes = comb.MetricsCombiner.Metrics.AdditionalMetrics[tempopb.AdditionalMetricReturnedBytes]
 		}
 		postSLOHook(resp, tenant, inspectBytes, elapsed, err)
+		traceByIDReturnedBytes.WithLabelValues(tenant).Add(float64(returnedBytes))
 
 		traceID, _ := tracing.ExtractTraceID(req.Context())
 		recordResult(
@@ -166,6 +167,7 @@ func newTraceIDV2Handler(cfg Config, next pipeline.AsyncRoundTripper[combiner.Pi
 		}
 
 		postSLOHook(resp, tenant, bytesProcessed, elapsed, err)
+		traceByIDReturnedBytes.WithLabelValues(tenant).Add(float64(returnedBytes))
 
 		traceID, _ := tracing.ExtractTraceID(req.Context())
 		recordResult(
