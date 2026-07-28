@@ -81,6 +81,8 @@ func newTraceIDHandler(cfg Config, next pipeline.AsyncRoundTripper[combiner.Pipe
 			"duration_seconds", elapsed.Seconds(),
 			"inspected_bytes", inspectBytes,
 			"request_throughput", float64(inspectBytes)/elapsed.Seconds(),
+			// no TraceQL engine on this path; use protobuf payload size
+			tempopb.AdditionalMetricEngineBytes, comb.Result().Size(),
 			"err", err,
 		)
 
@@ -199,6 +201,8 @@ func newTraceIDV2Handler(cfg Config, next pipeline.AsyncRoundTripper[combiner.Pi
 			"duration_seconds", elapsed.Seconds(),
 			"span_pruning_enabled", spanPruningEnabled,
 			"trace_filter_enabled", traceFilter != nil,
+			// no TraceQL engine on this path; use protobuf payload size
+			tempopb.AdditionalMetricEngineBytes, findResp.Size(),
 			"err", err,
 		)
 
