@@ -89,7 +89,7 @@ func newTraceIDHandler(cfg Config, next pipeline.AsyncRoundTripper[combiner.Pipe
 			"request_throughput", float64(inspectBytes)/elapsed.Seconds(),
 			"err", err,
 		)
-
+		recordTraceByIDMetrics(tenant, m)
 		return resp, err
 	})
 }
@@ -212,7 +212,7 @@ func newTraceIDV2Handler(cfg Config, next pipeline.AsyncRoundTripper[combiner.Pi
 			"trace_filter_enabled", traceFilter != nil,
 			"err", err,
 		)
-
+		recordTraceByIDMetrics(tenant, findResp.GetMetrics())
 		return resp, err
 	})
 }
