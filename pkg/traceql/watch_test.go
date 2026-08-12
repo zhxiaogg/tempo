@@ -72,6 +72,9 @@ func newTestWatcher(deactivateOn int, stats map[string]int64, conds ...Condition
 func (o *testWatcher) Conditions() []Condition { return o.conds }
 
 func (o *testWatcher) WatchSpan(Span) bool {
+	if !o.active {
+		return false // done; contract says do no further work
+	}
 	o.watched++
 	if o.deactivateOn > 0 && o.watched >= o.deactivateOn {
 		o.active = false
@@ -127,12 +130,12 @@ func TestSpanWatchers_WatchSpanPartitioning(t *testing.T) {
 	s.WatchSpans(spansetOf(newMockSpan([]byte{1})))
 	assert.True(t, s.Active())
 
-	// Second span: b goes inactive (a is skipped, only the active prefix is walked).
+	// Second span: b goes inactive. a is still called but rejects the span itself.
 	s.WatchSpans(spansetOf(newMockSpan([]byte{2})))
 	assert.True(t, s.Active())
 
-	// Every active watcher was visited exactly once per span it was active for,
-	// and the inactive ones were not revisited.
+	// Every watcher recorded exactly the spans it was active for; finished
+	// watchers rejected later spans without counting them.
 	assert.Equal(t, 1, a.watched, "a watched only the first span")
 	assert.Equal(t, 2, b.watched, "b watched the first two spans")
 	assert.Equal(t, 2, c.watched, "c watched both spans")

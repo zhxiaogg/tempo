@@ -1591,7 +1591,7 @@ func (e *metricsEvaluator) Do(ctx context.Context, f SpansetFetcher, fetcherStar
 			validSpansCount++
 			e.metricsPipeline.observe(s)
 			if watch {
-				watch = e.watchers.WatchSpanNoLock(s)
+				watch = e.watchers.WatchSpan(s)
 			}
 
 			if !needExemplar {
@@ -1697,7 +1697,7 @@ func (e *metricsEvaluator) DoSpansOnly(ctx context.Context, f SpansetFetcher, fe
 
 			e.metricsPipeline.observe(s)
 			if watch {
-				watch = e.watchers.WatchSpanNoLock(s)
+				watch = e.watchers.WatchSpan(s)
 			}
 			e.spansTotal++
 

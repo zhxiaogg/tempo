@@ -1025,6 +1025,14 @@ func (m *mockSpan) AllAttributesFunc(cb func(Attribute, Static)) {
 	}
 }
 
+func (m *mockSpan) AttributesEncodedSize() uint64 {
+	var n int
+	for a, v := range m.attributes {
+		n += AttributeNameEncodedSize(&a) + StaticEncodedSize(&v)
+	}
+	return uint64(n)
+}
+
 func (m *mockSpan) ID() []byte {
 	return m.id
 }
