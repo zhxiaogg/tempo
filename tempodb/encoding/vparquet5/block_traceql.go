@@ -142,6 +142,32 @@ func (s *span) AllAttributesFunc(cb func(traceql.Attribute, traceql.Static)) {
 	}
 }
 
+// AttributesEncodedSize walks the attribute slices inline rather than delegating to a helper:
+// a helper containing a loop is not inlinable, and the resulting per-slice calls cost more than
+// the walk itself on spans carrying few or no attributes. Indexing avoids copying the 64-byte Static.
+func (s *span) AttributesEncodedSize() uint64 {
+	var n int
+	for i := range s.traceAttrs {
+		n += traceql.AttributeNameEncodedSize(&s.traceAttrs[i].a) + traceql.StaticEncodedSize(&s.traceAttrs[i].s)
+	}
+	for i := range s.resourceAttrs {
+		n += traceql.AttributeNameEncodedSize(&s.resourceAttrs[i].a) + traceql.StaticEncodedSize(&s.resourceAttrs[i].s)
+	}
+	for i := range s.instrumentationAttrs {
+		n += traceql.AttributeNameEncodedSize(&s.instrumentationAttrs[i].a) + traceql.StaticEncodedSize(&s.instrumentationAttrs[i].s)
+	}
+	for i := range s.spanAttrs {
+		n += traceql.AttributeNameEncodedSize(&s.spanAttrs[i].a) + traceql.StaticEncodedSize(&s.spanAttrs[i].s)
+	}
+	for i := range s.eventAttrs {
+		n += traceql.AttributeNameEncodedSize(&s.eventAttrs[i].a) + traceql.StaticEncodedSize(&s.eventAttrs[i].s)
+	}
+	for i := range s.linkAttrs {
+		n += traceql.AttributeNameEncodedSize(&s.linkAttrs[i].a) + traceql.StaticEncodedSize(&s.linkAttrs[i].s)
+	}
+	return uint64(n)
+}
+
 func (s *span) AttributeFor(a traceql.Attribute) (traceql.Static, bool) {
 	find := func(a traceql.Attribute, attrs []attrVal) *traceql.Static {
 		if len(attrs) == 1 {

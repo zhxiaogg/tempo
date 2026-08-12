@@ -187,6 +187,11 @@ type Span interface {
 	// AllAttributesFunc is a way to access all attributes for this span, letting the span determine the
 	// optimal method. Avoids allocating a map like AllAttributes.
 	AllAttributesFunc(func(Attribute, Static))
+	// AttributesEncodedSize returns the estimated encoded size in bytes of every attribute on the
+	// span, name and value, as sized by AttributeNameEncodedSize and StaticEncodedSize.
+	// Implementations sum over their own storage so callers pay one call per span rather than an
+	// indirect callback per attribute.
+	AttributesEncodedSize() uint64
 
 	ID() []byte
 	StartTimeUnixNanos() uint64

@@ -1629,7 +1629,7 @@ func (e *metricsEvaluator) Do(ctx context.Context, f SpansetFetcher, fetcherStar
 			validSpansCount++
 			e.metricsPipeline.observe(s)
 			if watch {
-				watch = e.watchers.WatchSpanNoLock(s)
+				watch = e.watchers.WatchSpan(s)
 			}
 
 			if !needExemplar {
@@ -1803,7 +1803,7 @@ func (e *metricsEvaluator) observeSpansOnlyBatch(ctx context.Context, spans []Sp
 		e.metricsPipeline.observe(s)
 		if watch {
 			// e.mtx is held for the whole batch, so skip the watchers' own mutex.
-			watch = e.watchers.WatchSpanNoLock(s)
+			watch = e.watchers.WatchSpan(s)
 		}
 		e.spansTotal++
 

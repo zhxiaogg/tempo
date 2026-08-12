@@ -78,6 +78,10 @@ func (s *protoSpan) AllAttributesFunc(func(traceql.Attribute, traceql.Static)) {
 	panic("unreachable: protoSpan.AllAttributesFunc, CompileSpansetFilter rejects metrics queries")
 }
 
+func (s *protoSpan) AttributesEncodedSize() uint64 {
+	panic("unreachable: protoSpan.AttributesEncodedSize, CompileSpansetFilter rejects metrics queries")
+}
+
 func (s *protoSpan) DescendantOf(_, _ []traceql.Span, _, _, _ bool, _ []traceql.Span) []traceql.Span {
 	panic("unreachable: protoSpan.DescendantOf, CompileSpansetFilter rejects structural operators")
 }

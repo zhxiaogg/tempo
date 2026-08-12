@@ -68,6 +68,7 @@ func (b *benchSpan) AttributeFor(a Attribute) (Static, bool) {
 
 func (b *benchSpan) AllAttributes() map[Attribute]Static       { return nil }
 func (b *benchSpan) AllAttributesFunc(func(Attribute, Static)) {}
+func (b *benchSpan) AttributesEncodedSize() uint64             { return 0 }
 func (b *benchSpan) ID() []byte                                { return nil }
 func (b *benchSpan) StartTimeUnixNanos() uint64                { return 0 }
 func (b *benchSpan) DurationNanos() uint64                     { return 0 }
