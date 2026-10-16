@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"math/rand"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -714,4 +716,110 @@ func TestValuePredicatesRejectNulls(t *testing.T) {
 			testPredicate(t, tc)
 		})
 	}
+}
+
+// countingReaderAt counts reads, each a backend request on a real block.
+type countingReaderAt struct {
+	io.ReaderAt
+	reads int
+}
+
+func (r *countingReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	r.reads++
+	return r.ReaderAt.ReadAt(p, off)
+}
+
+// TestNilValuePredicateFooterNullCount: the footer's null count decides the chunk, so
+// the column index is read only when the footer has no statistics to go on.
+func TestNilValuePredicateFooterNullCount(t *testing.T) {
+	type testString struct {
+		S *string `parquet:",optional"`
+	}
+	a := "a"
+
+	testCases := []struct {
+		name       string
+		rows       []testString
+		skipBounds bool
+		keep       bool
+		indexReads int
+	}{
+		{name: "some nulls", rows: []testString{{&a}, {nil}}, keep: true},
+		{name: "no nulls", rows: []testString{{&a}, {&a}}, keep: false},
+		{name: "all nulls", rows: []testString{{nil}, {nil}}, keep: true},
+		{name: "no footer bounds falls back to the column index", rows: []testString{{&a}, {&a}}, skipBounds: true, keep: false, indexReads: 1},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var opts []parquet.WriterOption
+			if tc.skipBounds {
+				opts = append(opts, parquet.SkipPageBounds("S"))
+			}
+			buf := new(bytes.Buffer)
+			w := parquet.NewGenericWriter[testString](buf, opts...)
+			_, err := w.Write(tc.rows)
+			require.NoError(t, err)
+			require.NoError(t, w.Close())
+
+			r := &countingReaderAt{ReaderAt: bytes.NewReader(buf.Bytes())}
+			pf, err := parquet.OpenFile(r, int64(buf.Len()), parquet.SkipPageIndex(true))
+			require.NoError(t, err)
+
+			cc := &ColumnChunkHelper{ColumnChunk: pf.RowGroups()[0].ColumnChunks()[0]}
+			defer cc.Close()
+			r.reads = 0
+			require.Equal(t, tc.keep, NewNilValuePredicate().KeepColumnChunk(cc))
+			require.Equal(t, tc.indexReads, r.reads, "backend reads")
+		})
+	}
+}
+
+func TestColumnChunkHelperFooterStats(t *testing.T) {
+	type testString struct {
+		S *string `parquet:",optional"`
+	}
+	long := strings.Repeat("z", 40) // past the column index's 16-byte truncation
+	a := "a"
+
+	write := func(t *testing.T, rows []testString, opts ...parquet.WriterOption) *ColumnChunkHelper {
+		buf := new(bytes.Buffer)
+		w := parquet.NewGenericWriter[testString](buf, opts...)
+		_, err := w.Write(rows)
+		require.NoError(t, err)
+		require.NoError(t, w.Close())
+		pf, err := parquet.OpenFile(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+		require.NoError(t, err)
+		return &ColumnChunkHelper{ColumnChunk: pf.RowGroups()[0].ColumnChunks()[0]}
+	}
+
+	t.Run("values and nulls, with exact bounds", func(t *testing.T) {
+		stats, ok := write(t, []testString{{&a}, {nil}, {&long}}).FooterStats()
+		require.True(t, ok)
+		require.Equal(t, int64(3), stats.NumValues)
+		require.Equal(t, int64(1), stats.NullCount)
+		require.True(t, stats.HasBounds)
+		require.Equal(t, a, string(stats.Min.ByteArray()))
+		require.Equal(t, long, string(stats.Max.ByteArray()))
+	})
+
+	t.Run("only nulls has no bounds but a trusted count", func(t *testing.T) {
+		stats, ok := write(t, []testString{{nil}, {nil}}).FooterStats()
+		require.True(t, ok)
+		require.False(t, stats.HasBounds)
+		require.Equal(t, stats.NumValues, stats.NullCount)
+	})
+
+	t.Run("skipped bounds and no nulls can't be trusted", func(t *testing.T) {
+		_, ok := write(t, []testString{{&a}}, parquet.SkipPageBounds("S")).FooterStats()
+		require.False(t, ok)
+	})
+
+	t.Run("chunks not read from a file have none", func(t *testing.T) {
+		b := parquet.NewGenericBuffer[testString]()
+		_, err := b.Write([]testString{{&a}})
+		require.NoError(t, err)
+		_, ok := (&ColumnChunkHelper{ColumnChunk: b.ColumnChunks()[0]}).FooterStats()
+		require.False(t, ok)
+	})
 }

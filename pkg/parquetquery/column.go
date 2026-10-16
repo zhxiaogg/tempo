@@ -65,3 +65,29 @@ func (h *ColumnChunkHelper) Close() error {
 
 	return nil
 }
+
+// FooterStats are a column chunk's statistics from the file footer, which is read
+// with the file. The column index holds the same per page, but costs a separate read.
+type FooterStats struct {
+	NumValues int64 // including nulls
+	NullCount int64
+	// Min and Max are exact (unlike the column index, they are not truncated) and
+	// set only when HasBounds. Chunks of only nulls, and columns that skip page
+	// bounds, have none.
+	Min, Max  parquet.Value
+	HasBounds bool
+}
+
+// FooterStats returns the chunk's footer statistics. ok is false when there are none
+// to trust: the chunk isn't read from a file, or no statistics were written. Writers
+// need not fill in the null count, so a zero count is trusted only alongside bounds,
+// which the same writer wrote with it.
+func (h *ColumnChunkHelper) FooterStats() (stats FooterStats, ok bool) {
+	fc, isFile := h.ColumnChunk.(*parquet.FileColumnChunk)
+	if !isFile {
+		return FooterStats{}, false
+	}
+	stats = FooterStats{NumValues: fc.NumValues(), NullCount: fc.NullCount()}
+	stats.Min, stats.Max, stats.HasBounds = fc.Bounds()
+	return stats, stats.HasBounds || stats.NullCount > 0
+}

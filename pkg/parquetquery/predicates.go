@@ -610,6 +610,12 @@ func (p NilValuePredicate) String() string {
 }
 
 func (p NilValuePredicate) KeepColumnChunk(c *ColumnChunkHelper) bool {
+	// The footer's null count answers this without reading the column index,
+	// which is a separate backend request.
+	if stats, ok := c.FooterStats(); ok {
+		return stats.NullCount > 0
+	}
+
 	ci, err := c.ColumnIndex()
 	if err == nil && ci != nil {
 		for i := range ci.NumPages() {

@@ -1,0 +1,11 @@
+change_type: enhancement
+
+component: storage
+
+note: Improve `= nil` query performance by skipping a column index read per row group.
+
+issues: []
+
+subtext:
+
+user: zhxiaogg
