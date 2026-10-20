@@ -10,6 +10,7 @@ import (
 	"github.com/grafana/tempo/v3/tempodb/backend"
 	"github.com/grafana/tempo/v3/tempodb/encoding/common"
 	"github.com/grafana/tempo/v3/tempodb/encoding/unsupported"
+	"github.com/grafana/tempo/v3/tempodb/encoding/vcg1"
 	"github.com/grafana/tempo/v3/tempodb/encoding/vparquet4"
 	"github.com/grafana/tempo/v3/tempodb/encoding/vparquet5"
 )
@@ -70,6 +71,8 @@ func FromVersion(v string) (VersionedEncoding, error) {
 		return vparquet4.Encoding{}, nil
 	case vparquet5.VersionString:
 		return vparquet5.Encoding{}, nil
+	case vcg1.VersionString:
+		return vcg1.Encoding{}, nil
 	default:
 		if strings.Contains(v, "preview") {
 			return unsupported.Encoding{}, nil
