@@ -26,9 +26,10 @@ import (
 //
 // Why: this block directory holds only data.parquet, index and meta.json — its bloom-<n>
 // objects were not copied — and vparquet5.(*backendBlock).FindTraceByID begins with
-// checkBloom, which would fail with ErrDoesNotExist. The pass-through filter turns the bloom
-// check into a no-op (every id proceeds to the parquet lookup) without touching Tempo
-// library code. In production the bloom read is a cache / object-store hit that rules out
+// checkBloom, which would fail with ErrDoesNotExist. vcg1's FindTraceByID begins with the same
+// bloom check (bloom-<shard>, read through the bloom cache role), so both formats read their
+// bloom through this reader. The pass-through filter turns the bloom check into a no-op (every
+// id proceeds to the block lookup) without touching Tempo library code. In production the bloom read is a cache / object-store hit that rules out
 // absent ids; it is not part of this measurement on any server. All 200 benchmark ids are
 // present in the block, so the bloom could not have short-circuited any of them anyway.
 type bloomPassReader struct {
@@ -62,7 +63,8 @@ func (r *bloomPassReader) Read(ctx context.Context, name string, blockID uuid.UU
 //     server start (the same metadata a blocklist poll would hold) and the block is always
 //     searched. includeBlock only filters on BlockStart/BlockEnd and the time range, both of
 //     which the benchmark leaves open;
-//   - the bloom check passes every id (bloomPassReader above: this block has no bloom objects);
+//   - the bloom check passes every id, on either format (bloomPassReader above: this block has
+//     no bloom objects);
 //   - opts = common.DefaultSearchOptions() (the base the querier starts from; the querier
 //     adds MaxBytesPerTrace, which vparquet5's FindTraceByID does not read), no
 //     rw.cfg.Search.ApplyToOptions, no cache tiers (the local backend has none);
