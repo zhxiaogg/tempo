@@ -54,6 +54,9 @@ type Config struct {
 
 	// BlockConfig holds block settings from the storage section, it is not configurable via YAML
 	BlockConfig common.BlockConfig `yaml:"-"`
+	// BlockVersion overrides storage.trace.block.version for the live-store's blocks and WAL
+	// when set, so the live-store can stay on a WAL-capable encoding while backend blocks use another.
+	BlockVersion string `yaml:"block_version,omitempty"`
 
 	// ReadinessTargetLag is the target consumer lag threshold before the live-store
 	// is considered ready to serve queries. The live-store will wait until lag drops
