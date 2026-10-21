@@ -35,6 +35,7 @@ require (
 	github.com/grafana/e2e v0.1.2-0.20260925181323-2ec4363d2215
 	github.com/grafana/gomemcache v0.0.0-20261102183244-888ddcfa6685
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.4
+	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/jaegertracing/jaeger-idl v0.14.0
 	github.com/jedib0t/go-pretty/v6 v6.8.3
 	github.com/jsternberg/zap-logfmt v1.3.0
@@ -243,7 +244,6 @@ require (
 	github.com/hashicorp/go-uuid v1.0.3 // indirect
 	github.com/hashicorp/go-version v1.9.0 // indirect
 	github.com/hashicorp/golang-lru v1.0.2 // indirect
-	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/hashicorp/memberlist v0.7.0 // indirect
 	github.com/hashicorp/serf v0.11.0 // indirect
 	github.com/iancoleman/strcase v0.3.0 // indirect
