@@ -1144,3 +1144,41 @@ func countTraces(resps []*tempopb.TraceByIDResponse) int {
 	}
 	return n
 }
+
+func TestCompactWithConfigMixedVersions(t *testing.T) {
+	tempDir := t.TempDir()
+	localCfg := &local.Config{Path: path.Join(tempDir, "traces")}
+	_, rawW, _, err := local.New(localCfg)
+	require.NoError(t, err)
+	backendW := backend.NewWriter(rawW)
+
+	_, _, c, err := New(&Config{
+		Backend: backend.Local,
+		Pool: &pool.Config{
+			MaxWorkers: 10,
+			QueueDepth: 100,
+		},
+		Local: localCfg,
+		Block: &common.BlockConfig{
+			BloomFP:             .01,
+			BloomShardSizeBytes: 100_000,
+			Version:             "vParquet5",
+		},
+		WAL: &wal.Config{
+			Filepath: path.Join(tempDir, "wal"),
+		},
+		BlocklistPoll: 0,
+	}, nil, log.NewNopLogger())
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	var metas []*backend.BlockMeta
+	for _, v := range []string{"vParquet5", "vCG1"} {
+		meta := &backend.BlockMeta{BlockID: backend.NewUUID(), TenantID: testTenantID, Version: v}
+		require.NoError(t, backendW.WriteBlockMeta(ctx, meta))
+		metas = append(metas, meta)
+	}
+
+	_, err = c.CompactWithConfig(ctx, metas, testTenantID, &CompactorConfig{MaxCompactionRange: 24 * time.Hour}, &mockSharder{}, &mockOverrides{})
+	require.ErrorContains(t, err, "cannot compact blocks of different versions")
+}
