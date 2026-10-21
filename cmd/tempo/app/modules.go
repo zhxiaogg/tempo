@@ -711,6 +711,10 @@ func (t *App) initLiveStore() (services.Service, error) {
 	// Block config and WAL version are always sourced from storage.trace.block.
 	t.cfg.LiveStore.BlockConfig = *t.cfg.StorageConfig.Trace.Block
 	t.cfg.LiveStore.WAL.Version = t.cfg.StorageConfig.Trace.Block.Version
+	if v := t.cfg.LiveStore.BlockVersion; v != "" {
+		t.cfg.LiveStore.BlockConfig.Version = v
+		t.cfg.LiveStore.WAL.Version = v
+	}
 
 	var err error
 	t.liveStore, err = livestore.New(t.cfg.LiveStore, t.Overrides, t.store, log.Logger, prometheus.DefaultRegisterer)
