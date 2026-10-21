@@ -1,7 +1,7 @@
 // Package vcg1 serves CG blocks (one object, block.cg; see package cgfile) through Tempo's
 // per-block read path: Fetch reproduces vparquet5's storage contract for the TraceQL engine and
-// FindTraceByID returns what vparquet5 returns. Blocks are read only: every write, compaction
-// and WAL method is unsupported.
+// FindTraceByID returns what vparquet5 returns. CreateBlock writes blocks (package cgwrite) and
+// the Compactor merges them with vparquet5's compaction semantics; the WAL is not supported.
 package vcg1
 
 import (
@@ -17,7 +17,7 @@ import (
 // VersionString is the block format name in meta.json.
 const VersionString = "vCG1"
 
-var errReadOnly = errors.New("vCG1 blocks are read-only: writes, compaction and WAL are not supported")
+var errUnsupported = errors.New("vCG1: the WAL is not supported")
 
 // Encoding implements encoding.VersionedEncoding for CG blocks.
 type Encoding struct{}
@@ -29,30 +29,32 @@ func (Encoding) OpenBlock(meta *backend.BlockMeta, r backend.Reader) (common.Bac
 	return &backendBlock{meta: meta, r: r}, nil
 }
 
-func (Encoding) NewCompactor(common.CompactionOptions) common.Compactor { return nil }
-
-func (Encoding) CompactionSupported() bool { return false }
-
-func (Encoding) WritesSupported() bool { return false }
-
-func (Encoding) CreateBlock(context.Context, *common.BlockConfig, *backend.BlockMeta, common.Iterator, backend.Reader, backend.Writer) (*backend.BlockMeta, error) {
-	return nil, errReadOnly
+func (Encoding) NewCompactor(opts common.CompactionOptions) common.Compactor {
+	return NewCompactor(opts)
 }
 
-func (Encoding) CopyBlock(context.Context, *backend.BlockMeta, backend.Reader, backend.Writer) error {
-	return errReadOnly
+func (Encoding) CompactionSupported() bool { return true }
+
+func (Encoding) WritesSupported() bool { return true }
+
+func (Encoding) CreateBlock(ctx context.Context, cfg *common.BlockConfig, meta *backend.BlockMeta, i common.Iterator, r backend.Reader, to backend.Writer) (*backend.BlockMeta, error) {
+	return CreateBlock(ctx, cfg, meta, i, r, to)
 }
 
-func (Encoding) MigrateBlock(context.Context, *backend.BlockMeta, *backend.BlockMeta, backend.Reader, backend.Writer) error {
-	return errReadOnly
+func (Encoding) CopyBlock(ctx context.Context, meta *backend.BlockMeta, from backend.Reader, to backend.Writer) error {
+	return CopyBlock(ctx, meta, meta, from, to)
+}
+
+func (Encoding) MigrateBlock(ctx context.Context, fromMeta, toMeta *backend.BlockMeta, from backend.Reader, to backend.Writer) error {
+	return CopyBlock(ctx, fromMeta, toMeta, from, to)
 }
 
 func (Encoding) OpenWALBlock(string, string, time.Duration, time.Duration) (common.WALBlock, error, error) {
-	return nil, nil, errReadOnly
+	return nil, nil, errUnsupported
 }
 
 func (Encoding) CreateWALBlock(*backend.BlockMeta, string, string, time.Duration) (common.WALBlock, error) {
-	return nil, errReadOnly
+	return nil, errUnsupported
 }
 
 func (Encoding) OwnsWALBlock(fs.DirEntry) bool { return false }
