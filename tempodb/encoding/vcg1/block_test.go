@@ -193,3 +193,44 @@ func atoi(s string) int {
 	}
 	return n
 }
+
+// shardsReader answers shards.json reads: absent, or a fixed map.
+type shardsReader struct {
+	backend.Reader
+	reads int
+	raw   []byte
+}
+
+func (r *shardsReader) Read(context.Context, string, uuid.UUID, string, *backend.CacheInfo) ([]byte, error) {
+	r.reads++
+	if r.raw == nil {
+		return nil, backend.ErrDoesNotExist
+	}
+	return r.raw, nil
+}
+
+// TestShardCacheBounded: shard maps (and their absence) are read once per block, and the cache
+// holds at most shardCacheSize blocks.
+func TestShardCacheBounded(t *testing.T) {
+	ctx := context.Background()
+	r := &shardsReader{}
+	b := &backendBlock{meta: backend.NewBlockMeta("t", uuid.New(), VersionString), r: r}
+	for i := 0; i < 3; i++ {
+		sh, err := b.shards(ctx)
+		require.NoError(t, err)
+		require.Nil(t, sh)
+	}
+	require.Equal(t, 1, r.reads)
+
+	r2 := &shardsReader{raw: []byte(`[[0,2],[2,5]]`)}
+	b2 := &backendBlock{meta: backend.NewBlockMeta("t", uuid.New(), VersionString), r: r2}
+	sh, err := b2.shards(ctx)
+	require.NoError(t, err)
+	require.Equal(t, [][2]int{{0, 2}, {2, 5}}, sh)
+
+	for i := 0; i < shardCacheSize+100; i++ {
+		_, err := (&backendBlock{meta: backend.NewBlockMeta("t", uuid.New(), VersionString), r: r}).shards(ctx)
+		require.NoError(t, err)
+	}
+	require.LessOrEqual(t, shardCache.Len(), shardCacheSize)
+}

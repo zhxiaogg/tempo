@@ -337,6 +337,15 @@ func (rw *readerWriter) CompactWithConfig(ctx context.Context, blockMetas []*bac
 		totalRecords += int(blockMeta.TotalObjects)
 	}
 
+	// The block selector only groups blocks of one version; the compactor of the first block's
+	// version cannot read blocks of another.
+	for _, blockMeta := range blockMetas[1:] {
+		if blockMeta.Version != blockMetas[0].Version {
+			return nil, fmt.Errorf("cannot compact blocks of different versions: block %s is %s, block %s is %s",
+				blockMetas[0].BlockID, blockMetas[0].Version, blockMeta.BlockID, blockMeta.Version)
+		}
+	}
+
 	enc, err := encoding.FromVersion(blockMetas[0].Version)
 	if err != nil {
 		return nil, err

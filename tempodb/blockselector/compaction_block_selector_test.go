@@ -693,6 +693,58 @@ func TestTimeWindowBlockSelectorBlocksToCompact(t *testing.T) {
 			expectedHash2: fmt.Sprintf("%v-%v-%v-%v", tenantID, 0, now.Unix(), 0),
 		},
 		{
+			// a tenant switching formats holds blocks of both: each version compacts with its own
+			name: "vCG1 and vParquet5 blocks are compacted separately",
+			blocklist: []*backend.BlockMeta{
+				{
+					BlockID: backend.MustParse("00000000-0000-0000-0000-000000000001"),
+					EndTime: now,
+					Version: "vParquet5",
+				},
+				{
+					BlockID: backend.MustParse("00000000-0000-0000-0000-000000000002"),
+					EndTime: now,
+					Version: "vCG1",
+				},
+				{
+					BlockID: backend.MustParse("00000000-0000-0000-0000-000000000003"),
+					EndTime: now,
+					Version: "vParquet5",
+				},
+				{
+					BlockID: backend.MustParse("00000000-0000-0000-0000-000000000004"),
+					EndTime: now,
+					Version: "vCG1",
+				},
+			},
+			expected: []*backend.BlockMeta{
+				{
+					BlockID: backend.MustParse("00000000-0000-0000-0000-000000000002"),
+					EndTime: now,
+					Version: "vCG1",
+				},
+				{
+					BlockID: backend.MustParse("00000000-0000-0000-0000-000000000004"),
+					EndTime: now,
+					Version: "vCG1",
+				},
+			},
+			expectedHash: fmt.Sprintf("%v-%v-%v-%v", tenantID, 0, now.Unix(), 0),
+			expectedSecond: []*backend.BlockMeta{
+				{
+					BlockID: backend.MustParse("00000000-0000-0000-0000-000000000001"),
+					EndTime: now,
+					Version: "vParquet5",
+				},
+				{
+					BlockID: backend.MustParse("00000000-0000-0000-0000-000000000003"),
+					EndTime: now,
+					Version: "vParquet5",
+				},
+			},
+			expectedHash2: fmt.Sprintf("%v-%v-%v-%v", tenantID, 0, now.Unix(), 0),
+		},
+		{
 			name: "blocks with different dedicated columns are not selected together",
 			blocklist: []*backend.BlockMeta{
 				{
