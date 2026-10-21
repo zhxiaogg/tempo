@@ -10,8 +10,8 @@ import (
 
 const (
 	cacheKeyPrefixSearchJob       = "sj:"
-	cacheKeyPrefixSearchTag       = "st:"
-	cacheKeyPrefixSearchTagValues = "stv:"
+	cacheKeyPrefixSearchTag       = "st2:"
+	cacheKeyPrefixSearchTagValues = "stv2:"
 	cacheKeyPrefixQueryRange      = "qr:"
 )
 

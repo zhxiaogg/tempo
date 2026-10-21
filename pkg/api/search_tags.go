@@ -154,6 +154,10 @@ func parseSearchTagValuesBlockRequest(r *http.Request, enforceTraceQL bool) (*te
 
 	vals := r.URL.Query()
 
+	if req.DedicatedColumns, err = parseDedicatedColumns(vals); err != nil {
+		return nil, err
+	}
+
 	s := vals.Get(urlParamStartPage)
 	startPage, err := strconv.ParseInt(s, 10, 32)
 	if err != nil {
@@ -249,6 +253,10 @@ func ParseSearchTagsBlockRequest(r *http.Request) (*tempopb.SearchTagsBlockReque
 	}
 
 	vals := r.URL.Query()
+
+	if req.DedicatedColumns, err = parseDedicatedColumns(vals); err != nil {
+		return nil, err
+	}
 
 	s := vals.Get(urlParamStartPage)
 	startPage, err := strconv.ParseInt(s, 10, 32)
@@ -459,7 +467,7 @@ func BuildSearchTagsRequest(req *http.Request, searchReq *tempopb.SearchTagsRequ
 	return req, nil
 }
 
-func BuildSearchTagsBlockRequest(req *http.Request, searchReq *tempopb.SearchTagsBlockRequest) (*http.Request, error) {
+func BuildSearchTagsBlockRequest(req *http.Request, searchReq *tempopb.SearchTagsBlockRequest, dedicatedColumnsJSON string) (*http.Request, error) {
 	if req == nil {
 		req = &http.Request{
 			URL: &url.URL{},
@@ -481,6 +489,9 @@ func BuildSearchTagsBlockRequest(req *http.Request, searchReq *tempopb.SearchTag
 	q.addParam(urlParamTotalRecords, strconv.FormatUint(uint64(searchReq.TotalRecords), 10))
 	q.addParam(urlParamVersion, searchReq.Version)
 	q.addParam(urlParamFooterSize, strconv.FormatUint(uint64(searchReq.FooterSize), 10))
+	if len(dedicatedColumnsJSON) > 0 && dedicatedColumnsJSON != "null" {
+		q.addParam(urlParamDedicatedColumns, dedicatedColumnsJSON)
+	}
 
 	req.URL.RawQuery = q.query()
 
@@ -518,7 +529,7 @@ func BuildSearchTagValuesRequest(req *http.Request, searchReq *tempopb.SearchTag
 	return req, nil
 }
 
-func BuildSearchTagValuesBlockRequest(req *http.Request, searchReq *tempopb.SearchTagValuesBlockRequest) (*http.Request, error) {
+func BuildSearchTagValuesBlockRequest(req *http.Request, searchReq *tempopb.SearchTagValuesBlockRequest, dedicatedColumnsJSON string) (*http.Request, error) {
 	if req == nil {
 		req = &http.Request{
 			URL: &url.URL{},
@@ -540,8 +551,23 @@ func BuildSearchTagValuesBlockRequest(req *http.Request, searchReq *tempopb.Sear
 	qb.addParam(urlParamTotalRecords, strconv.FormatUint(uint64(searchReq.TotalRecords), 10))
 	qb.addParam(urlParamVersion, searchReq.Version)
 	qb.addParam(urlParamFooterSize, strconv.FormatUint(uint64(searchReq.FooterSize), 10))
+	if len(dedicatedColumnsJSON) > 0 && dedicatedColumnsJSON != "null" {
+		qb.addParam(urlParamDedicatedColumns, dedicatedColumnsJSON)
+	}
 
 	req.URL.RawQuery = qb.query()
 
 	return req, nil
+}
+
+func parseDedicatedColumns(vals url.Values) ([]*tempopb.DedicatedColumn, error) {
+	dedicatedColumns, _ := extractQueryParam(vals, urlParamDedicatedColumns)
+	if len(dedicatedColumns) == 0 {
+		return nil, nil
+	}
+	var dc []*tempopb.DedicatedColumn
+	if err := json.Unmarshal([]byte(dedicatedColumns), &dc); err != nil {
+		return nil, fmt.Errorf("failed to parse dedicated columns: %w", err)
+	}
+	return dc, nil
 }

@@ -89,7 +89,7 @@ func (r *fakeReq) buildSearchTagRequest(subR *http.Request) (*http.Request, erro
 }
 
 func (r *fakeReq) buildTagSearchBlockRequest(subR *http.Request, blockID string,
-	startPage int, pages int, _ *backend.BlockMeta,
+	startPage int, pages int, _ *backend.BlockMeta, _ string,
 ) (*http.Request, error) {
 	newReq := subR.Clone(subR.Context())
 	q := subR.URL.Query()
@@ -229,6 +229,12 @@ func TestTagsBackendRequestsUseBlockMetadata(t *testing.T) {
 	meta.TotalRecords = 2
 	meta.IndexPageSize = 64
 	meta.FooterSize = 32
+	meta.DedicatedColumns = backend.DedicatedColumns{
+		{Scope: backend.DedicatedColumnScopeResource, Name: "k8s.cluster.name", Type: backend.DedicatedColumnTypeString},
+		{Scope: backend.DedicatedColumnScopeSpan, Name: "http.status_code", Type: backend.DedicatedColumnTypeInt},
+	}
+	wantDC, err := api.NewDedicatedColumnsToJSON().JSONForDedicatedColumns(meta.DedicatedColumns)
+	require.NoError(t, err)
 
 	for _, tc := range []struct {
 		name  string
@@ -293,6 +299,7 @@ func TestTagsBackendRequestsUseBlockMetadata(t *testing.T) {
 				want.Set("totalRecords", "2")
 				want.Set("version", "vParquet4")
 				want.Set("footerSize", "32")
+				want.Set("dc", wantDC)
 				assert.Equal(t, want, got)
 				page++
 			}

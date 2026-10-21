@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/grafana/tempo/v3/pkg/tempopb"
+	"github.com/grafana/tempo/v3/tempodb/backend"
 )
 
 // TestParseSearchTagValues tests the SearchTagValues function
@@ -131,7 +132,7 @@ func TestSearchTagValuesBlockRequestRoundTripPreservesLimits(t *testing.T) {
 		FooterSize:    456,
 	}
 
-	httpReq, err := BuildSearchTagValuesBlockRequest(httptest.NewRequest("GET", "http://tempo/", nil), original)
+	httpReq, err := BuildSearchTagValuesBlockRequest(httptest.NewRequest("GET", "http://tempo/", nil), original, "")
 	require.NoError(t, err)
 	httpReq = mux.SetURLVars(httpReq, map[string]string{MuxVarTagName: original.SearchReq.TagName})
 
@@ -140,6 +141,56 @@ func TestSearchTagValuesBlockRequestRoundTripPreservesLimits(t *testing.T) {
 
 	require.Equal(t, original.SearchReq.MaxTagValues, parsed.SearchReq.MaxTagValues)
 	require.Equal(t, original.SearchReq.StaleValueThreshold, parsed.SearchReq.StaleValueThreshold)
+}
+
+func TestSearchTagBlockRequestsRoundTripDedicatedColumns(t *testing.T) {
+	dc := backend.DedicatedColumns{
+		{Scope: backend.DedicatedColumnScopeResource, Name: "k8s.cluster.name", Type: backend.DedicatedColumnTypeString},
+		{Scope: backend.DedicatedColumnScopeSpan, Name: "http.status_code", Type: backend.DedicatedColumnTypeInt},
+	}
+	dcJSON, err := NewDedicatedColumnsToJSON().JSONForDedicatedColumns(dc)
+	require.NoError(t, err)
+	want, err := dc.ToTempopb()
+	require.NoError(t, err)
+
+	tagValues := &tempopb.SearchTagValuesBlockRequest{
+		SearchReq:     &tempopb.SearchTagValuesRequest{TagName: "span.foo", Start: 100, End: 200},
+		BlockID:       uuid.New().String(),
+		PagesToSearch: 1,
+		IndexPageSize: 100,
+		TotalRecords:  1,
+		Version:       "vParquet5",
+		Size_:         1000,
+		FooterSize:    100,
+	}
+	httpReq, err := BuildSearchTagValuesBlockRequest(httptest.NewRequest("GET", "http://tempo/", nil), tagValues, dcJSON)
+	require.NoError(t, err)
+	httpReq = mux.SetURLVars(httpReq, map[string]string{MuxVarTagName: tagValues.SearchReq.TagName})
+	parsedValues, err := ParseSearchTagValuesBlockRequestV2(httpReq)
+	require.NoError(t, err)
+	require.Equal(t, want, parsedValues.DedicatedColumns)
+
+	tags := &tempopb.SearchTagsBlockRequest{
+		SearchReq:     &tempopb.SearchTagsRequest{Start: 100, End: 200},
+		BlockID:       uuid.New().String(),
+		PagesToSearch: 1,
+		IndexPageSize: 100,
+		TotalRecords:  1,
+		Version:       "vParquet5",
+		Size_:         1000,
+		FooterSize:    100,
+	}
+	httpReq, err = BuildSearchTagsBlockRequest(httptest.NewRequest("GET", "http://tempo/", nil), tags, dcJSON)
+	require.NoError(t, err)
+	parsedTags, err := ParseSearchTagsBlockRequest(httpReq)
+	require.NoError(t, err)
+	require.Equal(t, want, parsedTags.DedicatedColumns)
+
+	httpReq, err = BuildSearchTagsBlockRequest(httptest.NewRequest("GET", "http://tempo/", nil), tags, "")
+	require.NoError(t, err)
+	parsedTags, err = ParseSearchTagsBlockRequest(httpReq)
+	require.NoError(t, err)
+	require.Empty(t, parsedTags.DedicatedColumns)
 }
 
 // TestParseSearchTags tests the SearchTagValues function
