@@ -502,7 +502,7 @@ func verify(src, cgDir, idsPath string, random int, seed int64) error {
 	opts := common.DefaultSearchOptions()
 	cgFind := func(id []byte) (*tempopb.Trace, error) {
 		resp, err := cblk.FindTraceByID(ctx, id, opts)
-		if err != nil {
+		if err != nil || resp == nil {
 			return nil, err
 		}
 		return resp.Trace, nil

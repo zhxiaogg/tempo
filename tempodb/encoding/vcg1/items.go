@@ -193,8 +193,8 @@ func (d *dedItem) emit(o uint32, e *emitter) bool {
 		if d.nilOp {
 			break
 		}
-		v := d.k.value(en)
-		if !d.keep(en, v) {
+		v, ok := d.keep(en)
+		if !ok {
 			continue
 		}
 		matched = true
@@ -219,18 +219,24 @@ func (d *dedItem) emitNull(e *emitter) bool {
 	return false
 }
 
-func (d *dedItem) keep(en kmEnt, v parquet.Value) bool {
+// keep returns the entry's value and whether the predicate keeps it; a dictionary-coded
+// value is decoded only when kept (the predicate is cached per code).
+func (d *dedItem) keep(en kmEnt) (parquet.Value, bool) {
 	if d.pred == nil {
-		return true
+		return d.k.value(en), true
 	}
 	rd := d.k.rds[en.run]
-	if rd.Vals != nil && rd.Vals.Dict && !v.IsNull() {
+	if rd.Vals != nil && rd.Vals.Dict && !rd.Vals.IsNull(int(en.i)) {
 		for int(en.run) >= len(d.memo) {
 			d.memo = append(d.memo, nil)
 		}
-		return d.memo[en.run].keep(rd.Vals.Codes[en.i], func() bool { return d.pred.KeepValue(v) })
+		if !d.memo[en.run].keep(rd.Vals.Codes[en.i], func() bool { return d.pred.KeepValue(d.k.value(en)) }) {
+			return parquet.Value{}, false
+		}
+		return d.k.value(en), true
 	}
-	return d.pred.KeepValue(v)
+	v := d.k.value(en)
+	return v, d.pred.KeepValue(v)
 }
 
 // genItem is a level's generic attribute iterator (createAttributeIterator): attributes whose

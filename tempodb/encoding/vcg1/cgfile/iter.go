@@ -139,7 +139,11 @@ func (it *TraceIterator) load(ctx context.Context) error {
 	q := it.rd.NewRequestWithFooter(it.f)
 	var sels []RowSel
 	for _, t := range pointTables {
-		it.lo[t], it.hi[t] = it.f.Anchor(a, t), it.f.Anchor(b, t)
+		lo, hi, _, err := it.f.WindowRows(a, b, t)
+		if err != nil {
+			return err
+		}
+		it.lo[t], it.hi[t] = lo, hi
 		if it.lo[t] < it.hi[t] {
 			sels = append(sels, RowSel{T: t, Ivs: []Interval{{it.lo[t], it.hi[t]}}})
 		}
@@ -147,6 +151,19 @@ func (it *TraceIterator) load(ctx context.Context) error {
 	if err := q.LoadRows(ctx, sels); err != nil {
 		it.stats.Add(q.Stats())
 		return err
+	}
+	// the point-copy rows of the window's owners, from the pages just loaded
+	for l := 0; l < NumLevels; l++ {
+		ta, te, o := AttrsTable(l), ElemsTable(l), OwnerTable[l]
+		ea, err := q.SortedBounds(ctx, ta, AtOwner, Interval{it.lo[o], it.hi[o]})
+		if err != nil {
+			return err
+		}
+		el, err := q.SortedBounds(ctx, te, ElAttrRow, ea)
+		if err != nil {
+			return err
+		}
+		it.lo[ta], it.hi[ta], it.lo[te], it.hi[te] = ea.Lo, ea.Hi, el.Lo, el.Hi
 	}
 	for _, t := range pointTables {
 		cs := Cols(t)
