@@ -15,6 +15,8 @@ import (
 	"github.com/grafana/tempo/v3/tempodb/backend"
 	"github.com/grafana/tempo/v3/tempodb/encoding"
 	"github.com/grafana/tempo/v3/tempodb/encoding/common"
+	"github.com/grafana/tempo/v3/tempodb/encoding/vcg1"
+	"github.com/grafana/tempo/v3/tempodb/encoding/vparquet5"
 )
 
 // Run executes the benchmark cases against the block at blockPath, using the
@@ -32,7 +34,7 @@ func Run(ctx context.Context, blockPath string, prof *profile.BlockProfile, opts
 	if prof.TraceIDs.Mode == profile.TraceIDModeAll {
 		return nil, errors.New(`profile was built with --trace-ids=all, which embeds no IDs; rebuild it with a count`)
 	}
-	if err := warmBlock(ctx, raw, meta); err != nil {
+	if err := warmBlock(ctx, raw, meta, !opts.SkipBloom); err != nil {
 		return nil, err
 	}
 
@@ -81,7 +83,8 @@ func checkProfileMatchesBlock(prof *profile.BlockProfile, meta *backend.BlockMet
 		return fmt.Errorf("profile is for block %s in tenant %s, but the block here is %s in tenant %s",
 			prof.Block.BlockID, prof.Block.TenantID, meta.BlockID, meta.TenantID)
 	}
-	if prof.Block.Version != meta.Version {
+	// a vCG1 block converted from the profiled vParquet5 block holds the same traces
+	if prof.Block.Version != meta.Version && !(meta.Version == vcg1.VersionString && prof.Block.Version == vparquet5.VersionString) {
 		return fmt.Errorf("profile is for a %s block but this one is %s", prof.Block.Version, meta.Version)
 	}
 	return nil
