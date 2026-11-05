@@ -2,7 +2,6 @@ package cgwrite
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"sort"
 
 	cg "github.com/grafana/tempo/v3/tempodb/encoding/vcg1/cgfile"
@@ -119,43 +118,17 @@ func kmSection(flushes []kmFlush, rank []uint32) []byte {
 	return s.finish(nil)
 }
 
-// footerMeta is the footer's JSON block metadata (cgfile.BlockMeta).
-type footerMeta struct {
-	StartNs     uint64         `json:"start_ns"`
-	EndNs       uint64         `json:"end_ns"`
-	TotalTraces uint64         `json:"total_traces"`
-	Dedicated   []footerDedCol `json:"dedicated"`
-}
-
-type footerDedCol struct {
-	Scope string `json:"scope"`
-	Name  string `json:"name"`
-	IsInt bool   `json:"is_int"`
-}
-
-// footer returns the uncompressed footer.
+// footer returns the uncompressed footer (version 4): the schema, the key dictionaries of the
+// key-major groups, the rows of the tracing tables, then one section per schema group (a
+// row-major attrs group: its entry and element sections).
 func (w *Writer) footer() ([]byte, error) {
-	meta, err := json.Marshal(footerMeta{StartNs: w.startNs, EndNs: w.endNs, TotalTraces: uint64(w.rows[cg.TTraces]), Dedicated: w.footerDed})
-	if err != nil {
-		return nil, err
-	}
-	out := putBytes(nil, meta)
-	out = putUvarint(out, cg.NumTables)
-	for t := 0; t < cg.NumTables; t++ {
-		tw := w.tables[t]
-		if tw == nil {
-			out = putUvarint(out, 0)
-			continue
-		}
-		out = putUvarint(out, uint64(len(tw.groups)))
-		for _, g := range tw.groups {
-			out = putBytes(out, []byte(g.g.name))
-			out = putUvarint(out, uint64(len(g.g.cols)))
-			for _, c := range g.g.cols {
-				out = putUvarint(out, uint64(c))
-			}
+	var groups [7][]cg.SchemaGroup
+	for t := 0; t < 7; t++ {
+		for _, g := range w.tables[t].groups {
+			groups[t] = append(groups[t], cg.SchemaGroup{Name: g.g.name, Cols: g.g.cols, CutWith: g.g.cutWith})
 		}
 	}
+	out := cg.TracingSchema(groups).Append(nil)
 	// key dictionaries: every key of the level, sorted; ranks map level key ids to them
 	ranks := make([][]uint32, cg.NumLevels)
 	out = putUvarint(out, cg.NumLevels)
@@ -172,27 +145,22 @@ func (w *Writer) footer() ([]byte, error) {
 			out = putBytes(out, []byte(k.keys[id]))
 		}
 	}
-	for t := 0; t < cg.NumTables; t++ {
+	for t := 0; t < 7; t++ {
 		out = putUvarint(out, uint64(w.rows[t]))
 	}
-	out = putUvarint(out, uint64(len(w.anchors)))
-	for t := 0; t < cg.NumTables; t++ {
-		last := uint32(0)
-		for i := range w.anchors {
-			out = putUvarint(out, uint64(w.anchors[i][t]-last))
-			last = w.anchors[i][t]
+	for t := 0; t < 7; t++ {
+		for _, g := range w.tables[t].groups {
+			out = putBytes(out, groupSection(g.chunks))
 		}
-	}
-	for t := 0; t < cg.NumTables; t++ {
-		if tw := w.tables[t]; tw != nil {
-			for _, g := range tw.groups {
-				out = putBytes(out, groupSection(g.chunks))
+		for l, o := range cg.OwnerTable {
+			if o != t {
+				continue
 			}
+			rm := putBytes(nil, groupSection(w.tables[cg.AttrsTable(l)].groups[0].chunks))
+			rm = putBytes(rm, groupSection(w.tables[cg.ElemsTable(l)].groups[0].chunks))
+			out = putBytes(out, rm)
+			out = putBytes(out, kmSection(w.km[l].flushes, ranks[l]))
 		}
-	}
-	out = putUvarint(out, cg.NumLevels)
-	for l, k := range w.km {
-		out = putBytes(out, kmSection(k.flushes, ranks[l]))
 	}
 	return out, nil
 }

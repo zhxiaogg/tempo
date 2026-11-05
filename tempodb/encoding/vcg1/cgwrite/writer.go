@@ -12,8 +12,9 @@
 //   - Scan copy (key-major attributes): entries are buffered per (key, value type) in
 //     insertion order, which is already the run order; once the buffers of all levels hold
 //     KmBytes, the level holding the most is written as one flush of runs, run by run.
-//   - Anchors: one per page of traces.tmeta, the first row of every table at the page's first
-//     trace. CutAnchor forces the next trace to start a page (and so an anchor).
+//   - Window cuts: the pages of traces.tmeta (and of traces.tcuts, cut with it) start at cut
+//     traces; there the zones of the traces.first_* columns give the first row of every table.
+//     CutAnchor forces the next trace to start a page (and so a cut).
 //
 // The trace is the vParquet5 row Tempo would write (vparquet5.TraceConverter), so the
 // precomputed fields (nested set, rounded start times, service stats, root names) are
@@ -26,7 +27,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/klauspost/compress/zstd"
 
@@ -57,7 +57,7 @@ type Options struct {
 type Result struct {
 	Size      uint64 // bytes of the file
 	FooterLen uint32 // compressed footer bytes (the block meta's FooterSize)
-	Anchors   int    // anchors (the block meta's TotalRecords)
+	Anchors   int    // window cuts: pages of traces.tmeta (the block meta's TotalRecords)
 	Traces    uint32
 	Rows      [cg.NumTables]uint32
 	Chunks    int
@@ -76,16 +76,14 @@ type Writer struct {
 	km     [cg.NumLevels]*kmLevel
 	rows   [cg.NumTables]uint32
 
-	anchors [][cg.NumTables]uint32
+	anchors int
 	cut     bool
 
 	chunkBytes, kmBytes int
 
-	startNs, endNs uint64
-	footerDed      []footerDedCol
-	resDed         []cg.DedSlot
-	spanDed        []cg.DedSlot
-	eventDed       []cg.DedSlot
+	resDed   []cg.DedSlot
+	spanDed  []cg.DedSlot
+	eventDed []cg.DedSlot
 
 	byLeft map[int32][]byte
 	lastID []byte
@@ -124,14 +122,6 @@ func New(w io.Writer, opts Options) (*Writer, error) {
 	wr.resDed = cg.DedicatedSlots(opts.Dedicated, backend.DedicatedColumnScopeResource)
 	wr.spanDed = cg.DedicatedSlots(opts.Dedicated, backend.DedicatedColumnScopeSpan)
 	wr.eventDed = cg.DedicatedSlots(opts.Dedicated, backend.DedicatedColumnScopeEvent)
-	wr.footerDed = make([]footerDedCol, 0, len(opts.Dedicated))
-	for _, d := range opts.Dedicated {
-		s := string(d.Scope)
-		if s == "" {
-			s = string(backend.DedicatedColumnScopeSpan)
-		}
-		wr.footerDed = append(wr.footerDed, footerDedCol{Scope: strings.ToUpper(s[:1]) + s[1:], Name: d.Name, IsInt: d.Type == backend.DedicatedColumnTypeInt})
-	}
 	if _, err := wr.sink.write([]byte(cg.Magic)); err != nil {
 		return nil, err
 	}
@@ -149,7 +139,7 @@ func valueOr(v, d int) int {
 func (w *Writer) CutAnchor() { w.cut = true }
 
 // Anchors is the number of anchors so far.
-func (w *Writer) Anchors() int { return len(w.anchors) }
+func (w *Writer) Anchors() int { return w.anchors }
 
 // BufferedBytes is the memory held by the writer's buffers (pending pages and chunks,
 // dictionaries and scan-copy entries).
@@ -190,18 +180,8 @@ func (w *Writer) Add(tr *vparquet5.Trace) error {
 	}
 	w.cut = false
 	if tm.rows == 0 {
-		var a [cg.NumTables]uint32
-		for t := range a {
-			if w.tables[t] != nil {
-				a[t] = w.rows[t]
-			}
-		}
-		w.anchors = append(w.anchors, a)
+		w.anchors++
 	}
-	if tr.StartTimeUnixNano > 0 && (w.startNs == 0 || tr.StartTimeUnixNano < w.startNs) {
-		w.startNs = tr.StartTimeUnixNano
-	}
-	w.endNs = max(w.endNs, tr.EndTimeUnixNano)
 
 	tt.bytes(cg.TrTraceID, tr.TraceID)
 	tt.i64(cg.TrStart, int64(tr.StartTimeUnixNano))
@@ -212,6 +192,9 @@ func (w *Writer) Add(tr *vparquet5.Trace) error {
 	tt.i32(cg.TrFirstStat, int32(w.rows[cg.TServiceStats]))
 	tt.i32(cg.TrFirstResource, int32(w.rows[cg.TResources]))
 	tt.i32(cg.TrFirstSpan, int32(w.rows[cg.TSpans]))
+	tt.i32(cg.TrFirstScope, int32(w.rows[cg.TScopes]))
+	tt.i32(cg.TrFirstEvent, int32(w.rows[cg.TEvents]))
+	tt.i32(cg.TrFirstLink, int32(w.rows[cg.TLinks]))
 	if err := tt.endRow(w); err != nil {
 		return err
 	}
@@ -608,7 +591,7 @@ func (w *Writer) Close() (Result, error) {
 	res.Size = w.sink.pos
 	res.FooterLen = uint32(len(z))
 	res.FooterRaw = len(raw)
-	res.Anchors = len(w.anchors)
+	res.Anchors = w.anchors
 	res.Traces = w.rows[cg.TTraces]
 	res.Rows = w.rows
 	return res, nil
