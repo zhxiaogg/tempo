@@ -41,6 +41,10 @@ type RunOptions struct {
 
 	ReadBufferSize int `json:"readBufferSize,omitempty"`
 
+	// SkipBloom bypasses the bloom filter in trace-by-ID lookups, for blocks copied without
+	// their bloom objects or to measure the lookup itself.
+	SkipBloom bool `json:"skipBloom,omitempty"`
+
 	// BackendLatency and BackendBandwidth, in bytes per second, charge every
 	// backend request as an object store would. Zero leaves local reads as is.
 	BackendLatency   time.Duration `json:"backendLatencyNs,omitempty"`
@@ -66,5 +70,6 @@ func (opts RunOptions) searchOptions() common.SearchOptions {
 	if opts.ReadBufferSize > 0 {
 		readOpts.ReadBufferSize = opts.ReadBufferSize
 	}
+	readOpts.SkipBloom = opts.SkipBloom
 	return readOpts
 }

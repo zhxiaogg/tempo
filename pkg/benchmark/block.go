@@ -11,6 +11,8 @@ import (
 	"github.com/grafana/tempo/v3/tempodb/backend"
 	"github.com/grafana/tempo/v3/tempodb/backend/local"
 	"github.com/grafana/tempo/v3/tempodb/encoding/common"
+	"github.com/grafana/tempo/v3/tempodb/encoding/vcg1"
+	"github.com/grafana/tempo/v3/tempodb/encoding/vcg1/cgfile"
 	"github.com/grafana/tempo/v3/tempodb/encoding/vparquet4"
 	"github.com/grafana/tempo/v3/tempodb/encoding/vparquet5"
 )
@@ -59,23 +61,24 @@ func openLocalBlock(ctx context.Context, path string) (*backend.BlockMeta, backe
 // once before the run, instead of landing on whichever case first touches each object.
 // It reads through the raw reader: the counted and simulated readers charge every request,
 // and warming is not one to bill.
-func warmBlock(ctx context.Context, raw backend.RawReader, meta *backend.BlockMeta) error {
+func warmBlock(ctx context.Context, raw backend.RawReader, meta *backend.BlockMeta, blooms bool) error {
 	keyPath := backend.KeyPathForBlock(uuid.UUID(meta.BlockID), meta.TenantID)
 
-	var dataName string
+	var names []string
 	switch meta.Version {
 	case vparquet4.VersionString:
-		dataName = vparquet4.DataFileName
+		names = append(names, vparquet4.DataFileName, common.NameIndex)
 	case vparquet5.VersionString:
-		dataName = vparquet5.DataFileName
+		names = append(names, vparquet5.DataFileName, common.NameIndex)
+	case vcg1.VersionString:
+		names = append(names, cgfile.ObjectName)
 	default:
 		return fmt.Errorf("block %s is %s, which no supported encoding wrote", meta.BlockID, meta.Version)
 	}
-
-	names := make([]string, 0, int(meta.BloomShardCount)+2)
-	names = append(names, dataName, common.NameIndex)
 	for shard := range int(meta.BloomShardCount) {
-		names = append(names, common.BloomName(shard))
+		if blooms {
+			names = append(names, common.BloomName(shard))
+		}
 	}
 
 	for _, name := range names {

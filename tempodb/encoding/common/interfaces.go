@@ -43,6 +43,7 @@ type SearchOptions struct {
 	PrefetchTraceCount int    // How many traces to prefetch async.
 	ReadBufferCount    int
 	ReadBufferSize     int
+	SkipBloom          bool // skip the bloom filter in FindTraceByID (benchmarking only)
 
 	// TraceByIDReadBufferSize overrides ReadBufferSize for trace-by-ID lookups. <= 0 keeps ReadBufferSize.
 	TraceByIDReadBufferSize int
