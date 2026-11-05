@@ -3,6 +3,7 @@ package cgfile
 import (
 	"context"
 	"fmt"
+	"sort"
 )
 
 // Request is the state of one request on a block: the footer it read, the bytes it fetched,
@@ -260,3 +261,49 @@ func (q *Request) DropPagesBefore(t int, r uint32) {
 
 // DropRun forgets a decoded run.
 func (q *Request) DropRun(ref RunRef) { delete(q.runs, ref) }
+
+// SortedBounds returns the rows of table t whose column c, a sorted zoned int column without
+// nulls (owner rows, entry rows), holds a value in want: contiguous, since the column is
+// sorted. It reads, in one wave, at most the two pages where the bounds fall; their zones settle
+// the other pages.
+func (q *Request) SortedBounds(ctx context.Context, t, c int, want Interval) (Interval, error) {
+	col, err := q.Column(t, c)
+	if err != nil || col.Group == nil {
+		return Interval{}, err
+	}
+	ps := col.Group.Pages
+	k := col.K
+	i := sort.Search(len(ps), func(i int) bool { return ps[i].Bufs[k].Zone.Max >= int64(want.Lo) })
+	j := sort.Search(len(ps), func(i int) bool { return ps[i].Bufs[k].Zone.Min >= int64(want.Hi) })
+	if want.Lo >= want.Hi || i >= j {
+		r := q.Rows(t)
+		if i < len(ps) {
+			r = ps[i].First
+		}
+		return Interval{r, r}, nil
+	}
+	var need []int
+	if ps[i].Bufs[k].Zone.Min < int64(want.Lo) {
+		need = append(need, i)
+	}
+	if ps[j-1].Bufs[k].Zone.Max >= int64(want.Hi) && (len(need) == 0 || need[0] != j-1) {
+		need = append(need, j-1)
+	}
+	if err := q.Load(ctx, []PageSel{{T: t, C: c, Pages: need}}, nil); err != nil {
+		return Interval{}, err
+	}
+	// first row of page pi whose value is >= v
+	bound := func(pi int, v uint32) uint32 {
+		vals := col.Values(pi)
+		n := sort.Search(vals.N, func(x int) bool { return vals.Ints[x] >= int64(v) })
+		return ps[pi].First + uint32(n)
+	}
+	out := Interval{ps[i].First, ps[j-1].First + ps[j-1].Rows}
+	if ps[i].Bufs[k].Zone.Min < int64(want.Lo) {
+		out.Lo = bound(i, want.Lo)
+	}
+	if ps[j-1].Bufs[k].Zone.Max >= int64(want.Hi) {
+		out.Hi = bound(j-1, want.Hi)
+	}
+	return out, nil
+}

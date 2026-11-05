@@ -143,18 +143,23 @@ func TestFetcherWindows(t *testing.T) {
 	reg := Region{Off: 10, End: 90}
 	ranges := []Range{{Off: 12, Len: 3, Region: reg}, {Off: 40, Len: 20, Region: reg}, {Off: 13, Len: 1, Region: reg}}
 	require.NoError(t, f.Fetch(context.Background(), ranges))
-	// windows [10,26), [26,42), [42,58), [58,74)
-	require.Equal(t, [][2]int64{{10, 16}, {26, 16}, {42, 16}, {58, 16}}, m.reqs)
-	require.Equal(t, Stats{Requests: 4, Bytes: 64, Waves: 1}, f.Stats)
+	// windows start at the first byte not held: [12,28) (also holds 13), [40,56), [56,72)
+	require.Equal(t, [][2]int64{{12, 16}, {40, 16}, {56, 16}}, m.reqs)
+	require.Equal(t, Stats{Requests: 3, Bytes: 48, Waves: 1}, f.Stats)
 	b, err := f.Bytes(ranges[1])
 	require.NoError(t, err)
 	require.Equal(t, data[40:60], b)
 	// held windows are not asked again; the last window is clipped to the region
 	require.NoError(t, f.Fetch(context.Background(), []Range{{Off: 41, Len: 49, Region: reg}}))
-	require.Len(t, m.reqs, 5)
-	require.Equal(t, [2]int64{74, 16}, m.reqs[4])
+	require.Equal(t, [][2]int64{{72, 16}, {88, 2}}, m.reqs[3:])
 	require.Equal(t, int64(2), f.Stats.Waves)
 	b, err = f.Bytes(Range{Off: 41, Len: 49, Region: reg})
 	require.NoError(t, err)
 	require.Equal(t, data[41:90], b)
+	// a new window stops at the next held one
+	require.NoError(t, f.Fetch(context.Background(), []Range{{Off: 30, Len: 12, Region: reg}}))
+	require.Equal(t, [2]int64{30, 10}, m.reqs[5])
+	b, err = f.Bytes(Range{Off: 30, Len: 12, Region: reg})
+	require.NoError(t, err)
+	require.Equal(t, data[30:42], b)
 }

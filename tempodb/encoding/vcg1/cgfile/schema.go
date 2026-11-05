@@ -58,6 +58,9 @@ const (
 	TrFirstStat
 	TrFirstResource
 	TrFirstSpan
+	TrFirstScope
+	TrFirstEvent
+	TrFirstLink
 )
 
 const (
@@ -188,7 +191,8 @@ var (
 	tracesCols = []ColSpec{
 		zone("trace_id", PhysBytes), zone("start_ns", PhysInt64), zone("end_ns", PhysInt64),
 		zone("duration_ns", PhysInt64), col("root_service", PhysBytes), col("root_span", PhysBytes),
-		col("first_stat", PhysInt32), col("first_resource", PhysInt32), col("first_span", PhysInt32),
+		zone("first_stat", PhysInt32), zone("first_resource", PhysInt32), zone("first_span", PhysInt32),
+		zone("first_scope", PhysInt32), zone("first_event", PhysInt32), zone("first_link", PhysInt32),
 	}
 	serviceStatsCols = []ColSpec{
 		parentRow, col("service_name", PhysBytes), col("span_count", PhysInt32), col("error_count", PhysInt32),

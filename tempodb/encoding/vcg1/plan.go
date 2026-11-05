@@ -193,7 +193,42 @@ func compile(f *cg.Footer, conds []traceql.Condition, all bool, start, end uint6
 			return nil, err
 		}
 	}
-	return p, p.compileTrace(cats[lvTrace])
+	if err = p.compileTrace(cats[lvTrace]); err != nil {
+		return nil, err
+	}
+	p.prefilter()
+	return p, nil
+}
+
+// prefilter sets kmKey.pre: under AllConditions a dedicated item with a predicate that rejects
+// nulls rejects every owner without a kept value, so when it is its key's only reader the
+// entries it rejects can be dropped as the key is prepared (and their owners never visited).
+func (p *plan) prefilter() {
+	if !p.all {
+		return
+	}
+	uses := map[*kmKey]int{}
+	var cand []*dedItem
+	for _, lv := range p.lv {
+		if lv.gen != nil {
+			for _, k := range lv.gen.keys {
+				uses[k]++
+			}
+		}
+		for i, it := range lv.items {
+			if d, ok := it.(*dedItem); ok {
+				uses[d.k]++
+				if d.pred != nil && !d.nilOp && !lv.opt[i] && !d.pred.KeepValue(parquet.Value{}) {
+					cand = append(cand, d)
+				}
+			}
+		}
+	}
+	for _, d := range cand {
+		if uses[d.k] == 1 {
+			d.k.pre = d
+		}
+	}
 }
 
 func (p *plan) kmKey(l int, key string) *kmKey {

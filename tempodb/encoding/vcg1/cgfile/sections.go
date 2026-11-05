@@ -77,10 +77,12 @@ type Chunk struct {
 	Len   int64
 	Dicts []DictDesc // per group column; zero = no dictionary
 	Pages []Page     // sub-slice of Group.Pages
+	run   Region     // the chunk's run of back-to-back chunks of the group
 }
 
-// Region is the chunk's byte region.
-func (c *Chunk) Region() Region { return Region{Off: c.Off, End: c.Off + c.Len} }
+// Region is the region the chunk is read through: its run of back-to-back chunks of the
+// group, so one window can cover several chunks.
+func (c *Chunk) Region() Region { return c.run }
 
 // Group is a decoded group section: every chunk of a group of a table.
 type Group struct {
@@ -168,6 +170,17 @@ func parseGroup(sec []byte, ncol int) (*Group, error) {
 	}
 	if err := streamsErr(&S); err != nil {
 		return nil, err
+	}
+	for a := 0; a < len(g.Chunks); {
+		b := a + 1
+		for b < len(g.Chunks) && g.Chunks[b].Off == g.Chunks[b-1].Off+g.Chunks[b-1].Len {
+			b++
+		}
+		run := Region{Off: g.Chunks[a].Off, End: g.Chunks[b-1].Off + g.Chunks[b-1].Len}
+		for i := a; i < b; i++ {
+			g.Chunks[i].run = run
+		}
+		a = b
 	}
 	return g, nil
 }

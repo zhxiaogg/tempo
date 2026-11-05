@@ -43,8 +43,9 @@ func decoder() (*zstd.Decoder, error) {
 	return zstdDec, zstdErr
 }
 
-// reader opens block.cg (no I/O: the block meta carries the object and footer sizes).
-func (b *backendBlock) reader() (*cgfile.Reader, error) {
+// reader opens block.cg (no I/O: the block meta carries the object and footer sizes). window
+// is the read window (<= 0: cgfile.DefaultWindow).
+func (b *backendBlock) reader(window int) (*cgfile.Reader, error) {
 	if b.meta.Size_ == 0 || b.meta.FooterSize == 0 {
 		return nil, fmt.Errorf("vCG1 block %s: meta has no size/footerSize", b.meta.BlockID)
 	}
@@ -53,13 +54,17 @@ func (b *backendBlock) reader() (*cgfile.Reader, error) {
 		return nil, err
 	}
 	rr := cgfile.BackendRangeReader{R: b.r, Name: cgfile.ObjectName, BlockID: uuid.UUID(b.meta.BlockID), TenantID: b.meta.TenantID, CacheInfo: &backend.CacheInfo{Meta: b.meta}}
-	return cgfile.OpenKnown(rr, int64(b.meta.Size_), b.meta.FooterSize, cgfile.WithDecoder(dec))
+	opts := []cgfile.Option{cgfile.WithDecoder(dec)}
+	if window > 0 {
+		opts = append(opts, cgfile.WithWindow(int64(window)))
+	}
+	return cgfile.OpenKnown(rr, int64(b.meta.Size_), b.meta.FooterSize, opts...)
 }
 
 // request starts a request on the block: one read of exactly the footer and trailer, whose
-// sizes the block meta carries.
-func (b *backendBlock) request(ctx context.Context) (*cgfile.Request, error) {
-	rd, err := b.reader()
+// sizes the block meta carries. Reads use the options' read buffer size as the window.
+func (b *backendBlock) request(ctx context.Context, opts common.SearchOptions) (*cgfile.Request, error) {
+	rd, err := b.reader(opts.ReadBufferSize)
 	if err != nil {
 		return nil, err
 	}
@@ -138,15 +143,20 @@ func (b *backendBlock) checkBloom(ctx context.Context, id common.ID) (bool, erro
 // FindTraceByID checks the bloom filter first (as vparquet5 does: in production a lookup fans
 // out over every block of the time range, and the bloom rules most of them out without
 // touching block.cg), then reads the footer and the trace.
-func (b *backendBlock) FindTraceByID(ctx context.Context, id common.ID, _ common.SearchOptions) (*tempopb.TraceByIDResponse, error) {
-	found, err := b.checkBloom(ctx, id)
-	if err != nil {
-		return nil, err
+func (b *backendBlock) FindTraceByID(ctx context.Context, id common.ID, opts common.SearchOptions) (*tempopb.TraceByIDResponse, error) {
+	if !opts.SkipBloom {
+		found, err := b.checkBloom(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return nil, nil
+		}
 	}
-	if !found {
-		return nil, nil
+	if opts.TraceByIDReadBufferSize > 0 {
+		opts.ReadBufferSize = opts.TraceByIDReadBufferSize
 	}
-	q, err := b.request(ctx)
+	q, err := b.request(ctx, opts)
 	if err != nil {
 		return nil, err
 	}

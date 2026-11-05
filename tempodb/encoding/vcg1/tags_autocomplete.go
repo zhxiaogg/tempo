@@ -709,7 +709,10 @@ type acRun struct {
 func (x *acRun) exec() (bool, error) {
 	x.live = map[cg.RunRef]struct{}{}
 	for _, wr := range windows(x.r.q.F, x.r.a, x.r.e) {
-		w := newWindow(x.r.q, wr[0], wr[1])
+		w, err := newWindow(x.r.q, wr[0], wr[1])
+		if err != nil {
+			return false, err
+		}
 		for _, p := range x.plans {
 			stop, err := x.window(p, w)
 			if err != nil || stop {
@@ -724,9 +727,7 @@ func (x *acRun) exec() (bool, error) {
 // release drops what no later window needs (as the fetcher does).
 func (x *acRun) release(w *window) {
 	q := x.r.q
-	for t := 0; t < cg.NumTables; t++ {
-		q.DropPagesBefore(t, w.hi[t])
-	}
+	w.dropPages()
 	for _, p := range x.plans {
 		for _, k := range p.keys {
 			for _, ref := range k.refs {

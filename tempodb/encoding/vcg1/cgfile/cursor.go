@@ -78,3 +78,7 @@ func (c *cursor) bytes() []byte {
 }
 
 func (c *cursor) done() bool { return c.p == len(c.b) }
+
+func putUvarint(b []byte, v uint64) []byte { return binary.AppendUvarint(b, v) }
+
+func putBytes(b, v []byte) []byte { return append(binary.AppendUvarint(b, uint64(len(v))), v...) }
