@@ -18,6 +18,8 @@ type kmKey struct {
 	ok    bool                 // the key is in the level's key dictionary
 	want  [cg.VTEmpty + 1]bool // run value types some iterator reads
 
+	pre *dedItem // the key's only reader, whose rejected entries reject their owner: they are dropped
+
 	refs []cg.RunRef
 	rds  []*cg.RunData
 	ents []kmEnt // sorted by owner, stable
@@ -61,12 +63,24 @@ func (k *kmKey) wantAll() {
 func (k *kmKey) prepare(w *window) {
 	t := cg.OwnerTable[k.level]
 	lo, hi := w.lo[t], w.hi[t]
+	if k.pre != nil {
+		k.pre.memo = k.pre.memo[:0] // per run index of this window
+	}
 	for ri, ref := range k.refs {
 		rd := w.q.Run(ref)
 		k.rds = append(k.rds, rd)
 		j := sort.Search(len(rd.Owners), func(i int) bool { return rd.Owners[i] >= lo })
+		if d := k.pre; d != nil && rd.Meta.VType != d.vt {
+			continue
+		}
 		for ; j < len(rd.Owners) && rd.Owners[j] < hi; j++ {
-			k.ents = append(k.ents, kmEnt{o: rd.Owners[j], run: int32(ri), i: int32(j)})
+			en := kmEnt{o: rd.Owners[j], run: int32(ri), i: int32(j)}
+			if k.pre != nil {
+				if _, ok := k.pre.keep(en); !ok {
+					continue
+				}
+			}
+			k.ents = append(k.ents, en)
 		}
 	}
 	if len(k.refs) > 1 {

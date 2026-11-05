@@ -15,8 +15,8 @@ type RangeReader interface {
 // buffered reader, so backend requests are (at most) 1 MiB windows of the chunk.
 const DefaultWindow = 1 << 20
 
-// Region is a contiguous byte region read as windows aligned to its start: a group chunk, or
-// the runs of one key in a key-major flush.
+// Region is a contiguous byte region a window may span: a run of back-to-back chunks of a
+// group, or the runs of one key in a key-major flush. Windows never cross its end.
 type Region struct {
 	Off, End int64
 }
@@ -42,13 +42,14 @@ func (s *Stats) Add(o Stats) {
 	s.Waves += o.Waves
 }
 
-// Fetcher is a per-request read cache. A range is read as the windows of its region that
-// cover it; each window is fetched once and kept for the rest of the request. Not safe for
+// Fetcher is a per-request read cache. A range is read through windows of up to the window
+// size starting at its first byte not yet held (capped at its region end and at the next held
+// window); each window is fetched once and kept for the rest of the request. Not safe for
 // concurrent use.
 type Fetcher struct {
 	r       RangeReader
 	window  int64
-	windows map[int64][]byte // window start -> bytes (windows of disjoint regions never collide)
+	windows []held // sorted by offset, disjoint
 	Stats   Stats
 
 	todo []window
@@ -56,58 +57,81 @@ type Fetcher struct {
 
 type window struct{ off, end int64 }
 
+type held struct {
+	off int64
+	b   []byte
+}
+
+func (h held) end() int64 { return h.off + int64(len(h.b)) }
+
 // NewFetcher returns a fetcher reading windows of the given size (DefaultWindow if <= 0).
 func NewFetcher(r RangeReader, windowSize int64) *Fetcher {
 	if windowSize <= 0 {
 		windowSize = DefaultWindow
 	}
-	return &Fetcher{r: r, window: windowSize, windows: make(map[int64][]byte)}
+	return &Fetcher{r: r, window: windowSize}
 }
 
-func (f *Fetcher) span(r Range) (k0, k1 int64, err error) {
-	if r.Len <= 0 {
-		return 0, -1, nil
-	}
+func checkRange(r Range) error {
 	if r.Off < r.Region.Off || r.Off+r.Len > r.Region.End {
-		return 0, 0, fmt.Errorf("cgfile: range [%d,+%d) outside its region [%d,%d)", r.Off, r.Len, r.Region.Off, r.Region.End)
+		return fmt.Errorf("cgfile: range [%d,+%d) outside its region [%d,%d)", r.Off, r.Len, r.Region.Off, r.Region.End)
 	}
-	return (r.Off - r.Region.Off) / f.window, (r.Off + r.Len - 1 - r.Region.Off) / f.window, nil
+	return nil
 }
 
-// Fetch reads, as one wave, every window covering the ranges that the request does not hold
+// at returns the index of the first held window ending after off.
+func (f *Fetcher) at(off int64) int {
+	return sort.Search(len(f.windows), func(i int) bool { return f.windows[i].end() > off })
+}
+
+// Fetch reads, as one wave, the windows covering the ranges that the request does not hold
 // yet. Windows are issued sequentially in offset order (one request in flight).
 func (f *Fetcher) Fetch(ctx context.Context, ranges []Range) error {
-	f.todo = f.todo[:0]
+	rs := make([]Range, 0, len(ranges))
 	for _, r := range ranges {
-		k0, k1, err := f.span(r)
-		if err != nil {
+		if r.Len <= 0 {
+			continue
+		}
+		if err := checkRange(r); err != nil {
 			return err
 		}
-		for k := k0; k <= k1; k++ {
-			a := r.Region.Off + k*f.window
-			if _, ok := f.windows[a]; ok {
+		rs = append(rs, r)
+	}
+	sort.Slice(rs, func(i, j int) bool { return rs[i].Off < rs[j].Off })
+	f.todo = f.todo[:0]
+	for _, r := range rs {
+		for p, end := r.Off, r.Off+r.Len; p < end; {
+			if n := len(f.todo); n > 0 && p < f.todo[n-1].end {
+				p = f.todo[n-1].end // planned windows are ascending: only the last can cover p
 				continue
 			}
-			f.todo = append(f.todo, window{a, min(a+f.window, r.Region.End)})
+			i := f.at(p)
+			if i < len(f.windows) && f.windows[i].off <= p {
+				p = f.windows[i].end()
+				continue
+			}
+			e := min(p+f.window, r.Region.End)
+			if i < len(f.windows) {
+				e = min(e, f.windows[i].off)
+			}
+			f.todo = append(f.todo, window{p, e})
+			p = e
 		}
 	}
 	if len(f.todo) == 0 {
 		return nil
 	}
-	sort.Slice(f.todo, func(i, j int) bool { return f.todo[i].off < f.todo[j].off })
 	f.Stats.Waves++
-	for i, w := range f.todo {
-		if i > 0 && w.off == f.todo[i-1].off {
-			continue
-		}
+	for _, w := range f.todo {
 		buf := make([]byte, w.end-w.off)
 		if err := f.r.ReadRange(ctx, w.off, buf); err != nil {
 			return fmt.Errorf("cgfile: read [%d,%d): %w", w.off, w.end, err)
 		}
 		f.Stats.Requests++
 		f.Stats.Bytes += int64(len(buf))
-		f.windows[w.off] = buf
+		f.windows = append(f.windows, held{w.off, buf})
 	}
+	sort.Slice(f.windows, func(i, j int) bool { return f.windows[i].off < f.windows[j].off })
 	return nil
 }
 
@@ -123,40 +147,34 @@ func (f *Fetcher) ReadExact(ctx context.Context, off int64, n int) ([]byte, erro
 	return buf, nil
 }
 
-// Bytes returns the bytes of a range already fetched. The result aliases the cached window
+// Bytes returns the bytes of a range already fetched. The result aliases the held window
 // unless the range crosses a window boundary (then it is a copy). Callers must not modify it.
 func (f *Fetcher) Bytes(r Range) ([]byte, error) {
-	k0, k1, err := f.span(r)
-	if err != nil {
-		return nil, err
-	}
-	if k1 < k0 {
+	if r.Len <= 0 {
 		return nil, nil
 	}
-	get := func(k int64) ([]byte, int64, error) {
-		a := r.Region.Off + k*f.window
-		w, ok := f.windows[a]
-		if !ok {
-			return nil, 0, fmt.Errorf("cgfile: window %d of region [%d,%d) not fetched", k, r.Region.Off, r.Region.End)
-		}
-		return w, a, nil
-	}
-	w, a, err := get(k0)
-	if err != nil {
+	if err := checkRange(r); err != nil {
 		return nil, err
 	}
-	if k0 == k1 {
-		s := r.Off - a
-		return w[s : s+r.Len : s+r.Len], nil
+	end := r.Off + r.Len
+	i := f.at(r.Off)
+	if i == len(f.windows) || f.windows[i].off > r.Off {
+		return nil, fmt.Errorf("cgfile: [%d,%d) not fetched", r.Off, end)
+	}
+	w := f.windows[i]
+	if end <= w.end() {
+		s := r.Off - w.off
+		return w.b[s : s+r.Len : s+r.Len], nil
 	}
 	out := make([]byte, 0, r.Len)
-	out = append(out, w[r.Off-a:]...)
-	for k := k0 + 1; k <= k1; k++ {
-		if w, a, err = get(k); err != nil {
-			return nil, err
+	out = append(out, w.b[r.Off-w.off:]...)
+	for p := w.end(); p < end; {
+		if i++; i == len(f.windows) || f.windows[i].off != p {
+			return nil, fmt.Errorf("cgfile: [%d,%d) not fetched", p, end)
 		}
-		need := r.Off + r.Len - a
-		out = append(out, w[:min(int64(len(w)), need)]...)
+		w = f.windows[i]
+		out = append(out, w.b[:min(int64(len(w.b)), end-p)]...)
+		p = w.end()
 	}
 	return out, nil
 }
