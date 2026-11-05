@@ -110,15 +110,17 @@ func (b *backendBlock) FindTraceByID(ctx context.Context, traceID common.ID, opt
 		))
 	defer span.End()
 
-	common.MetricFindBlocks.WithLabelValues(b.meta.TenantID, common.FindBlocksStageBloomChecked).Inc()
-	found, err := b.checkBloom(derivedCtx, traceID)
-	if err != nil {
-		return nil, err
+	if !opts.SkipBloom {
+		common.MetricFindBlocks.WithLabelValues(b.meta.TenantID, common.FindBlocksStageBloomChecked).Inc()
+		found, err := b.checkBloom(derivedCtx, traceID)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return nil, nil
+		}
+		common.MetricFindBlocks.WithLabelValues(b.meta.TenantID, common.FindBlocksStageBloomPass).Inc()
 	}
-	if !found {
-		return nil, nil
-	}
-	common.MetricFindBlocks.WithLabelValues(b.meta.TenantID, common.FindBlocksStageBloomPass).Inc()
 
 	ok, rowGroup, err := b.checkIndex(derivedCtx, traceID)
 	if err != nil {

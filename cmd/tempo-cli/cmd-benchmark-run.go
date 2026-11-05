@@ -28,6 +28,7 @@ type benchmarkRunCmd struct {
 	StaleValueThreshold   uint32 `help:"repeated values a tag-value lookup tolerates before it stops, 0 for no limit" default:"0"`
 
 	ReadBufferSize string `help:"read buffer size, e.g. 8MiB, 0 for the default" default:"0"`
+	SkipBloom      bool   `help:"skip the bloom filter in trace-by-ID lookups"`
 
 	BackendLatency   time.Duration `help:"latency added to every backend request, simulating an object store"`
 	BackendBandwidth string        `help:"per-request backend bandwidth per second, e.g. 100MiB, simulating an object store; 0 for unlimited" default:"0"`
@@ -68,6 +69,7 @@ func (cmd *benchmarkRunCmd) Run(_ *globalOptions) error {
 		MaxTagValues:          cmd.MaxTagValues,
 		StaleValueThreshold:   cmd.StaleValueThreshold,
 		ReadBufferSize:        int(readBufferSize),
+		SkipBloom:             cmd.SkipBloom,
 		BackendLatency:        cmd.BackendLatency,
 		BackendBandwidth:      int64(bandwidth),
 	})
