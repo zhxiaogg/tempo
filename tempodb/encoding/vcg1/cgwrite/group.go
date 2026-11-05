@@ -2,6 +2,7 @@ package cgwrite
 
 import (
 	"bytes"
+	"math"
 
 	cg "github.com/grafana/tempo/v3/tempodb/encoding/vcg1/cgfile"
 )
@@ -83,6 +84,8 @@ type groupW struct {
 	// chunks are the written chunks, for the footer.
 	chunks []chunkMeta
 	npages int
+	// followers are the groups cut with this one: they cut a page whenever it does.
+	followers []*groupW
 }
 
 func newGroupW(t int, g group) *groupW {
@@ -117,15 +120,6 @@ func (g *groupW) memBytes() int {
 	return n
 }
 
-// endRow closes a row and cuts the page once it holds pageBytes.
-func (g *groupW) endRow(w *Writer) error {
-	g.rows++
-	if g.acc >= g.g.pageBytes {
-		return g.cutPage(w)
-	}
-	return nil
-}
-
 // cutPage encodes the pending page (first flushing the pending chunk if the page would take
 // it past ChunkBytes).
 func (g *groupW) cutPage(w *Writer) error {
@@ -149,6 +143,11 @@ func (g *groupW) cutPage(w *Writer) error {
 	g.last = len(g.out) - before
 	g.pages = append(g.pages, pageMeta{rows: uint32(g.rows), bufs: bufs})
 	g.rows, g.acc = 0, 0
+	for _, f := range g.followers {
+		if err := f.cutPage(w); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -267,12 +266,18 @@ type tableW struct {
 func newTableW(t, pageBytes, attrPageBytes int) *tableW {
 	tw := &tableW{t: t, col: make([]*colBuf, len(cg.Cols(t))), gof: make([]*groupW, len(cg.Cols(t)))}
 	for _, g := range defaultGroups(t) {
-		if t >= 7 { // point-copy attributes and elements
+		switch {
+		case g.cutWith >= 0:
+			g.pageBytes = math.MaxInt // cut only with its leader
+		case t >= 7: // point-copy attributes and elements
 			g.pageBytes = attrPageBytes
-		} else {
+		default:
 			g.pageBytes = pageBytes
 		}
 		gw := newGroupW(t, g)
+		if g.cutWith >= 0 {
+			tw.groups[g.cutWith].followers = append(tw.groups[g.cutWith].followers, gw)
+		}
 		tw.groups = append(tw.groups, gw)
 		for k, c := range g.cols {
 			tw.col[c], tw.gof[c] = gw.cols[k], gw
@@ -337,10 +342,17 @@ func (tw *tableW) null(c int) {
 	tw.gof[c].acc += width(cb.spec.Phys)
 }
 
+// endRow closes a row in every group, then cuts the pages that hold pageBytes (and their
+// followers' pages, which hold the same rows).
 func (tw *tableW) endRow(w *Writer) error {
 	for _, g := range tw.groups {
-		if err := g.endRow(w); err != nil {
-			return err
+		g.rows++
+	}
+	for _, g := range tw.groups {
+		if g.acc >= g.g.pageBytes {
+			if err := g.cutPage(w); err != nil {
+				return err
+			}
 		}
 	}
 	w.rows[tw.t]++

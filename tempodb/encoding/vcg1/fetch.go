@@ -23,7 +23,7 @@ func (b *backendBlock) Fetch(ctx context.Context, req traceql.FetchSpansRequest,
 		return traceql.FetchSpansResponse{}, fmt.Errorf("conditions invalid: %w", err)
 	}
 	coalesceConditions(&req)
-	q, err := b.request(ctx)
+	q, err := b.request(ctx, opts)
 	if err != nil {
 		return traceql.FetchSpansResponse{}, err
 	}
@@ -32,7 +32,7 @@ func (b *backendBlock) Fetch(ctx context.Context, req traceql.FetchSpansRequest,
 		return traceql.FetchSpansResponse{}, err
 	}
 	f := &fetcher{ctx: ctx, q: q, req: req, wins: windows(q.F, a, e), live: map[cg.RunRef]struct{}{}}
-	if f.p1, err = compile(q.F, req.Conditions, req.AllConditions, req.StartTimeUnixNanos, req.EndTimeUnixNanos, b.meta.DedicatedColumns, false, false); err != nil {
+	if f.p1, err = compile(q.F, req.Conditions, req.AllConditions, req.TraceStartTimeUnixNanos, req.TraceEndTimeUnixNanos, b.meta.DedicatedColumns, false, false); err != nil {
 		return traceql.FetchSpansResponse{}, err
 	}
 	if req.SecondPass != nil {
@@ -85,7 +85,11 @@ func (f *fetcher) Next(context.Context) (*traceql.Spanset, error) {
 		if f.done || f.wi >= len(f.wins) {
 			return nil, nil
 		}
-		f.w = newWindow(f.q, f.wins[f.wi][0], f.wins[f.wi][1])
+		w, err := newWindow(f.q, f.wins[f.wi][0], f.wins[f.wi][1])
+		if err != nil {
+			return nil, err
+		}
+		f.w = w
 		f.wi++
 		if err := f.first(); err != nil {
 			return nil, err
@@ -166,9 +170,7 @@ func (f *fetcher) second() error {
 // release drops what no later window needs: decoded pages ending in this window and runs of
 // flushes this window finished.
 func (f *fetcher) release(w *window) {
-	for t := 0; t < cg.NumTables; t++ {
-		f.q.DropPagesBefore(t, w.hi[t])
-	}
+	w.dropPages()
 	for _, p := range []*plan{f.p1, f.p2} {
 		if p == nil {
 			continue
@@ -203,13 +205,14 @@ type pass struct {
 
 	// levels mapped to spans through their scan-copy runs' links instead of offset columns
 	linked              [nLv]bool
-	resOfSpan, scOfSpan []uint32 // local owner per local span, or none
+	resOfSpan, scOfSpan linkOf   // local owner per local span, or none
 	evOff, evList       []uint32 // events with entries per local span (CSR)
 	noneRes, noneSc     upper
 
-	act  [nLv]bool
-	none bool       // provably no span of the window matches: nothing was read
-	em   [4]emitter // reused (an emitter passed to an item escapes)
+	act   [nLv]bool
+	none  bool       // provably no span of the window matches: nothing was read
+	noMin bool       // spanFetcher.candidates: the collector minimum is not checked
+	em    [4]emitter // reused (an emitter passed to an item escapes)
 }
 
 const (
@@ -288,33 +291,178 @@ func (p *pass) link(l int) {
 		}
 		return
 	}
-	of := make([]uint32, ns)
-	for i := range of {
-		of[i] = none
-	}
+	var runs []linkRun
 	for _, k := range p.levelKeys(l) {
 		for _, en := range k.ents {
 			rd := k.rds[en.run]
 			s0 := rd.Links[0][en.i] - w.lo[cg.TSpans]
-			for s := s0; s < s0+rd.Links[1][en.i]; s++ {
-				of[s] = en.o - w.lo[t]
+			if n := rd.Links[1][en.i]; n > 0 {
+				runs = append(runs, linkRun{s0, min(s0+n, ns), en.o - w.lo[t]})
 			}
 		}
 	}
-	if l == lvRes {
-		p.resOfSpan = of
-	} else {
-		p.scOfSpan = of
+	// several keys of one owner repeat its run
+	if !sort.SliceIsSorted(runs, func(i, j int) bool { return runs[i].s0 < runs[j].s0 }) {
+		sort.Slice(runs, func(i, j int) bool { return runs[i].s0 < runs[j].s0 })
 	}
+	out := runs[:0]
+	for i, r := range runs {
+		if i == 0 || r != runs[i-1] {
+			out = append(out, r)
+		}
+	}
+	if l == lvRes {
+		p.resOfSpan = linkOf{runs: out}
+	} else {
+		p.scOfSpan = linkOf{runs: out}
+	}
+}
+
+// linkRun is the local spans [s0, s1) of local owner o, from its run entries' links.
+type linkRun struct{ s0, s1, o uint32 }
+
+// linkOf maps ascending local spans to their owners through sorted, disjoint link runs.
+type linkOf struct {
+	runs []linkRun
+	p    int
+}
+
+func (l *linkOf) of(s uint32) uint32 {
+	if l.p > 0 && s < l.runs[l.p-1].s1 {
+		l.p = sort.Search(len(l.runs), func(i int) bool { return l.runs[i].s1 > s })
+	}
+	for l.p < len(l.runs) && l.runs[l.p].s1 <= s {
+		l.p++
+	}
+	if l.p < len(l.runs) && l.runs[l.p].s0 <= s {
+		return l.runs[l.p].o
+	}
+	return none
+}
+
+// spanRuns returns the window-local span ranges whose trace, resource and scope the pass
+// keeps, each owner evaluated once, or ok=false when those levels cannot narrow the window.
+// Levels that cannot reject are skipped, and so is a trace level that only checks the time
+// range unless withTime; exact reports that every level that can reject was applied.
+func (p *pass) spanRuns(withTime bool) (runs []cg.Interval, ok, exact bool) {
+	if !p.all || p.drv != nil {
+		return nil, false, false
+	}
+	exact = true
+	keep := func(lvl int, first []uint32, eval func(*upper, uint32) bool) {
+		var u upper
+		var out []cg.Interval
+		add := func(a, b uint32) {
+			if a >= b {
+				return
+			}
+			if n := len(out); n > 0 && out[n-1].Hi == a {
+				out[n-1].Hi = b
+				return
+			}
+			out = append(out, cg.Interval{Lo: a, Hi: b})
+		}
+		if p.linked[lvl] {
+			lo := &p.resOfSpan
+			if lvl == lvScope {
+				lo = &p.scOfSpan
+			}
+			var nu upper
+			if eval(&nu, none) {
+				exact = false // spans without entries pass: not narrowed here
+				return
+			}
+			for _, r := range lo.runs {
+				if eval(&u, r.o) {
+					add(r.s0, r.s1)
+				}
+			}
+		} else {
+			if first == nil {
+				exact = false
+				return
+			}
+			for i := 0; i+1 < len(first); i++ {
+				if eval(&u, uint32(i)) {
+					add(first[i], first[i+1])
+				}
+			}
+		}
+		if !ok {
+			runs, ok = out, true
+			return
+		}
+		runs = intersect(runs, out)
+	}
+	if p.active(lvTrace) {
+		if p.lv[lvTrace].rejects() || (withTime && p.timeStart != nil) {
+			keep(lvTrace, p.trFirst, p.trace)
+		} else if p.timeStart != nil {
+			exact = false
+		}
+	}
+	for _, l := range []int{lvRes, lvScope} {
+		if p.active(l) && p.lv[l].rejects() {
+			first := p.resFirst
+			if l == lvScope {
+				first = p.scFirst
+			}
+			keep(l, first, func(u *upper, i uint32) bool { return p.group(l, u, i) })
+		}
+	}
+	return runs, ok, exact
+}
+
+// rejects reports whether the level can reject an owner under AllConditions (the collector
+// minimum aside): a generic iterator, or an item with a predicate.
+func (lv *level) rejects() bool {
+	if lv.gen != nil {
+		return true
+	}
+	for i, it := range lv.items {
+		if !lv.opt[i] && rejects(it) {
+			return true
+		}
+	}
+	return false
+}
+
+func rejects(it item) bool {
+	switch x := it.(type) {
+	case *dedItem:
+		return x.pred != nil || x.nilOp
+	case *colItem:
+		return x.pred != nil
+	case passItem:
+		return false
+	}
+	return true
+}
+
+// intersect returns the intersection of two sorted, disjoint interval lists.
+func intersect(a, b []cg.Interval) []cg.Interval {
+	var out []cg.Interval
+	for i, j := 0, 0; i < len(a) && j < len(b); {
+		lo, hi := max(a[i].Lo, b[j].Lo), min(a[i].Hi, b[j].Hi)
+		if lo < hi {
+			out = append(out, cg.Interval{Lo: lo, Hi: hi})
+		}
+		if a[i].Hi < b[j].Hi {
+			i++
+		} else {
+			j++
+		}
+	}
+	return out
 }
 
 // owner is the local resource or scope of local span s.
 func (p *pass) owner(l int, s uint32, po *parentOf) uint32 {
 	if p.linked[l] {
 		if l == lvRes {
-			return p.resOfSpan[s]
+			return p.resOfSpan.of(s)
 		}
-		return p.scOfSpan[s]
+		return p.scOfSpan.of(s)
 	}
 	return po.of(s)
 }
@@ -753,7 +901,17 @@ func (p *pass) first() ([]*traceql.Spanset, error) {
 		}
 		cur = nil
 	}
-	for s := uint32(0); s < p.w.n(cg.TSpans); s++ {
+	runs, narrowed, _ := p.spanRuns(false)
+	if !narrowed {
+		runs = []cg.Interval{{Lo: 0, Hi: p.w.n(cg.TSpans)}}
+	}
+	for s, ri := uint32(0), 0; ri < len(runs); s++ {
+		if s >= runs[ri].Hi {
+			if ri++; ri == len(runs) {
+				break
+			}
+		}
+		s = max(s, runs[ri].Lo)
 		t := trOf.of(s)
 		if !p.trace(&tu, t) {
 			continue

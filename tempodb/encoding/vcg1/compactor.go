@@ -89,7 +89,7 @@ func (c *Compactor) Compact(ctx context.Context, l log.Logger, r backend.Reader,
 		}
 
 		b := &backendBlock{meta: m, r: r}
-		rd, err := b.reader()
+		rd, err := b.reader(0)
 		if err != nil {
 			return nil, fmt.Errorf("error opening block %s: %w", m.BlockID, err)
 		}

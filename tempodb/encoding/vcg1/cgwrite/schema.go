@@ -12,7 +12,7 @@ const (
 	AttrPageBytes = 4 << 20
 	// ChunkBytes bounds a group chunk: a page that would take the pending chunk (compressed
 	// pages + uncompressed dictionaries) past it starts the next chunk.
-	ChunkBytes = 1 << 20
+	ChunkBytes = 2 << 20
 	// KmBytes bounds the buffered scan-copy entries of all levels together (exact bytes of the
 	// buffers); past it the level holding the most is flushed.
 	KmBytes = 256 << 20
@@ -24,7 +24,7 @@ const (
 	runRawMin      = 64
 	runRawDistinct = 0.5
 
-	fileVersion   = 2
+	fileVersion   = 4
 	footerVariant = 1
 	numStreams    = 12
 )
@@ -131,22 +131,31 @@ func width(p cg.Phys) int {
 	return 4
 }
 
-// group is a column group: a name, its column ids in page order and its page size.
+// group is a column group: a name, its column ids in page order, its page size and the
+// earlier group of the table whose page starts it follows (-1: pages cut by size).
 type group struct {
 	name      string
 	cols      []int
 	pageBytes int
+	cutWith   int
 }
 
 // defaultGroups are the reference writer's default column groups. Key-major tables have none.
+// traces.tcuts holds first rows no query reads; its pages start with tmeta's, so the zones of
+// the traces.first_* columns at those page starts cut the windows.
 func defaultGroups(t int) []group {
-	g := func(name string, cols ...int) group { return group{name: name, cols: cols, pageBytes: PageBytes} }
+	g := func(name string, cols ...int) group {
+		return group{name: name, cols: cols, pageBytes: PageBytes, cutWith: -1}
+	}
 	switch t {
 	case cg.TTraces:
+		tcuts := g("tcuts", cg.TrFirstScope, cg.TrFirstEvent, cg.TrFirstLink)
+		tcuts.cutWith = anchorGroup
 		return []group{
 			g("tid", cg.TrTraceID),
 			g("tmeta", cg.TrStart, cg.TrDuration, cg.TrRootService, cg.TrRootSpan, cg.TrFirstStat, cg.TrFirstResource, cg.TrFirstSpan),
 			g("trest", cg.TrEnd),
+			tcuts,
 		}
 	case cg.TServiceStats:
 		return []group{g("ss", cg.SsServiceName, cg.SsSpanCount, cg.SsErrorCount)}
@@ -181,8 +190,9 @@ func defaultGroups(t int) []group {
 	for i := range cols {
 		cols[i] = i
 	}
-	return []group{{name: "all", cols: cols, pageBytes: AttrPageBytes}}
+	return []group{{name: "all", cols: cols, pageBytes: AttrPageBytes, cutWith: -1}}
 }
 
-// anchorGroup is the traces group whose pages carry the anchors: the one holding first_span.
+// anchorGroup is the traces group whose page starts are the window cuts: the one holding
+// first_span.
 const anchorGroup = 1

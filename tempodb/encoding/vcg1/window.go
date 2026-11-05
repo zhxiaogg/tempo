@@ -14,18 +14,29 @@ import (
 // windowSpans is the target span count of a processing window (as the Rust CG server).
 const windowSpans = 1 << 19
 
-// window is a processing window: the rows of every table between two anchors.
+// window is a processing window: the rows of every table between two anchors. The rows of
+// the point-copy tables are a superset (cg.Footer.WindowRows): readers filter them by owner.
 type window struct {
-	q      *cg.Request
-	lo, hi [cg.NumTables]uint32
+	q            *cg.Request
+	lo, hi, keep [cg.NumTables]uint32
 }
 
-func newWindow(q *cg.Request, a, b int) *window {
+func newWindow(q *cg.Request, a, b int) (*window, error) {
 	w := &window{q: q}
 	for t := 0; t < cg.NumTables; t++ {
-		w.lo[t], w.hi[t] = q.F.Anchor(a, t), q.F.Anchor(b, t)
+		var err error
+		if w.lo[t], w.hi[t], w.keep[t], err = q.F.WindowRows(a, b, t); err != nil {
+			return nil, err
+		}
 	}
-	return w
+	return w, nil
+}
+
+// dropPages forgets the decoded pages no later window needs.
+func (w *window) dropPages() {
+	for t := 0; t < cg.NumTables; t++ {
+		w.q.DropPagesBefore(t, w.keep[t])
+	}
 }
 
 func (w *window) n(t int) uint32 { return w.hi[t] - w.lo[t] }

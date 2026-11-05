@@ -105,7 +105,7 @@ type tagReq struct {
 }
 
 func (b *backendBlock) tagRequest(ctx context.Context, opts common.SearchOptions) (*tagReq, error) {
-	q, err := b.request(ctx)
+	q, err := b.request(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +122,7 @@ func (b *backendBlock) tagRequest(ctx context.Context, opts common.SearchOptions
 
 func (r *tagReq) bytes() uint64 { return uint64(r.q.Stats().Bytes) }
 
-// rows is the file-row range of table t in the request's anchor range.
+// rows is the file-row range of tracing table t (t < 7) in the request's anchor range.
 func (r *tagReq) rows(t int) (uint32, uint32) { return r.q.F.Anchor(r.a, t), r.q.F.Anchor(r.e, t) }
 
 func (b *backendBlock) SearchTags(ctx context.Context, scope traceql.AttributeScope, cb common.TagsCallback, mcb common.MetricsCallback, opts common.SearchOptions) error {
@@ -172,9 +172,14 @@ func (r *tagReq) levelKeys(l int) ([]string, error) {
 		keys = f.Keys[l]
 	} else {
 		ta := cg.AttrsTable(l)
-		lo, hi := r.rows(ta)
+		olo, ohi := r.rows(cg.OwnerTable[l])
+		iv, err := r.q.SortedBounds(r.ctx, ta, cg.AtOwner, cg.Interval{Lo: olo, Hi: ohi})
+		if err != nil {
+			return nil, err
+		}
+		lo, hi := iv.Lo, iv.Hi
 		seen := map[string]struct{}{}
-		err := r.q.VisitColumn(r.ctx, ta, cg.AtKey, lo, hi, true, func(src cg.ColumnSource) bool {
+		err = r.q.VisitColumn(r.ctx, ta, cg.AtKey, lo, hi, true, func(src cg.ColumnSource) bool {
 			add := func(b []byte) {
 				if _, ok := seen[string(b)]; !ok {
 					seen[string(b)] = struct{}{}
@@ -394,7 +399,10 @@ func staticOfValues(v *cg.Values, i int, d *cg.Dict) traceql.Static {
 // parentIDValues reports every span's parent span id (derived where the writer left it null).
 func (r *tagReq) parentIDValues(cb func(traceql.Static) bool) (bool, error) {
 	for _, wr := range windows(r.q.F, r.a, r.e) {
-		w := newWindow(r.q, wr[0], wr[1])
+		w, err := newWindow(r.q, wr[0], wr[1])
+		if err != nil {
+			return false, err
+		}
 		ld := newLoader(w)
 		for _, c := range []int{cg.SpParentSpanID, cg.SpParentID, cg.SpNestedLeft, cg.SpSpanID} {
 			ld.allRows(cg.TSpans, c)
@@ -420,9 +428,7 @@ func (r *tagReq) parentIDValues(cb func(traceql.Static) bool) (bool, error) {
 				return true, nil
 			}
 		}
-		for t := 0; t < cg.NumTables; t++ {
-			r.q.DropPagesBefore(t, w.hi[t])
-		}
+		w.dropPages()
 	}
 	return false, nil
 }
