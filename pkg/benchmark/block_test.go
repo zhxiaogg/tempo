@@ -84,7 +84,7 @@ func TestWarmBlock(t *testing.T) {
 
 	t.Run("reads every object", func(t *testing.T) {
 		rec := &recordingReader{RawReader: raw}
-		require.NoError(t, warmBlock(ctx, rec, meta))
+		require.NoError(t, warmBlock(ctx, rec, meta, true))
 
 		// data.parquet is what every supported encoding names its data object.
 		want := []string{"data.parquet", common.NameIndex}
@@ -96,12 +96,12 @@ func TestWarmBlock(t *testing.T) {
 
 	t.Run("names a failing object", func(t *testing.T) {
 		rec := &recordingReader{RawReader: raw, fail: common.NameIndex}
-		require.ErrorContains(t, warmBlock(ctx, rec, meta), common.NameIndex)
+		require.ErrorContains(t, warmBlock(ctx, rec, meta, true), common.NameIndex)
 	})
 
 	t.Run("rejects an unsupported version", func(t *testing.T) {
 		meta := meta
 		meta.Version = "v0"
-		require.ErrorContains(t, warmBlock(ctx, raw, meta), "v0")
+		require.ErrorContains(t, warmBlock(ctx, raw, meta, true), "v0")
 	})
 }
