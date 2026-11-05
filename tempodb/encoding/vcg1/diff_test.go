@@ -47,7 +47,11 @@ func TestBlockDiff(t *testing.T) {
 		f := traceql.NewSpansetFetcherWrapper(func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansResponse, error) {
 			return blk.Fetch(ctx, req, opts)
 		})
-		resp, err := traceql.NewEngine().ExecuteSearch(ctx, &tempopb.SearchRequest{Query: os.Getenv("CG_QUERY"), SpansPerSpanSet: 1_000_000}, f)
+		req := &tempopb.SearchRequest{Query: os.Getenv("CG_QUERY"), SpansPerSpanSet: 1_000_000}
+		if os.Getenv("CG_TIME") != "" { // the block's time range, as the benchmark sends it
+			req.Start, req.End = uint32(meta.StartTime.Unix()), uint32(meta.EndTime.Unix())+1
+		}
+		resp, err := traceql.NewEngine().ExecuteSearch(ctx, req, f)
 		require.NoError(t, err)
 		out := map[string]*tempopb.TraceSearchMetadata{}
 		for _, tr := range resp.Traces {

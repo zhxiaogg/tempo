@@ -209,10 +209,16 @@ type pass struct {
 	evOff, evList       []uint32 // events with entries per local span (CSR)
 	noneRes, noneSc     upper
 
-	act   [nLv]bool
-	none  bool       // provably no span of the window matches: nothing was read
-	noMin bool       // spanFetcher.candidates: the collector minimum is not checked
-	em    [4]emitter // reused (an emitter passed to an item escapes)
+	act  [nLv]bool
+	none bool // provably no span of the window matches: nothing was read
+	// first pass of a search, deferring the trace level (loadFirst): skipTr while the other
+	// levels load; then trRows are the candidate traces (file rows, nil: every row) and cand the
+	// candidate spans (window-local)
+	skipTr bool
+	trRows []cg.Interval
+	cand   []cg.Interval
+	noMin  bool       // spanFetcher.candidates: the collector minimum is not checked
+	em     [4]emitter // reused (an emitter passed to an item escapes)
 }
 
 const (
@@ -394,7 +400,9 @@ func (p *pass) spanRuns(withTime bool) (runs []cg.Interval, ok, exact bool) {
 		}
 		runs = intersect(runs, out)
 	}
-	if p.active(lvTrace) {
+	if p.active(lvTrace) && p.skipTr {
+		exact = false
+	} else if p.active(lvTrace) {
 		if p.lv[lvTrace].rejects() || (withTime && p.timeStart != nil) {
 			keep(lvTrace, p.trFirst, p.trace)
 		} else if p.timeStart != nil {
@@ -480,6 +488,9 @@ func (p *pass) rows(t int) []cg.Interval {
 			return rowIvs(p.drvTraces(0))
 		}
 	}
+	if t == cg.TTraces && p.trRows != nil {
+		return p.trRows
+	}
 	return p.w.all(t)
 }
 
@@ -487,6 +498,18 @@ func (p *pass) rows(t int) []cg.Interval {
 func (p *pass) rowsNext(t int) []cg.Interval {
 	if p.drv != nil && t == cg.TTraces {
 		return rowIvs(p.drvTraces(1))
+	}
+	if t == cg.TTraces && p.trRows != nil {
+		var out []cg.Interval
+		for _, r := range p.trRows {
+			hi := min(r.Hi+1, p.w.hi[t])
+			if n := len(out); n > 0 && out[n-1].Hi >= r.Lo {
+				out[n-1].Hi = max(out[n-1].Hi, hi)
+				continue
+			}
+			out = append(out, cg.Interval{Lo: r.Lo, Hi: hi})
+		}
+		return out
 	}
 	return p.w.all(t)
 }
@@ -535,12 +558,134 @@ func (p *pass) load() error {
 	return p.prepare()
 }
 
+// loadFirst is load for the first pass of a search. When a level below the trace can reject, the
+// trace level (conditions, time range and outputs) waits: the first wave reads the other levels
+// and the span-to-trace map, picks the candidate spans, and a second wave reads the trace
+// level at their traces only, so a window where nothing matches reads no trace column.
+func (p *pass) loadFirst() error {
+	if !p.deferTraces() {
+		return p.load()
+	}
+	p.skipTr = true
+	ld := newLoader(p.w)
+	if err := p.need(ld); err != nil {
+		return err
+	}
+	if p.empty() {
+		p.none = true
+		return nil
+	}
+	if err := ld.exec(p.ctx); err != nil {
+		return err
+	}
+	if err := p.prepare(); err != nil {
+		return err
+	}
+	cand := p.candidates()
+	p.skipTr = false
+	if len(cand) == 0 {
+		p.none = true
+		return nil
+	}
+	var trs []uint32
+	trOf := parentOf{first: p.trFirst}
+	for _, r := range cand {
+		for s := r.Lo; s < r.Hi; {
+			t := trOf.of(s)
+			trs = append(trs, p.w.lo[cg.TTraces]+t)
+			s = max(s+1, p.trFirst[t+1])
+		}
+	}
+	if 2*len(trs) < int(p.w.n(cg.TTraces)) {
+		p.trRows = rowIvs(trs)
+	}
+	p.cand = cand
+	ld = newLoader(p.w)
+	lv := p.lv[lvTrace]
+	if lv.gen != nil {
+		if err := lv.gen.need(p, ld); err != nil {
+			return err
+		}
+	}
+	for _, it := range lv.items {
+		if err := it.need(p, ld); err != nil {
+			return err
+		}
+	}
+	if p.timeStart != nil {
+		_ = p.timeStart.need(p, ld)
+		_ = p.timeEnd.need(p, ld)
+	}
+	if err := ld.exec(p.ctx); err != nil {
+		return err
+	}
+	if lv.gen != nil {
+		if err := lv.gen.prepare(p); err != nil {
+			return err
+		}
+	}
+	for _, it := range lv.items {
+		if err := it.prepare(p); err != nil {
+			return err
+		}
+	}
+	if p.timeStart != nil {
+		if err := p.timeStart.prepare(p); err != nil {
+			return err
+		}
+		if err := p.timeEnd.prepare(p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// deferTraces reports whether loadFirst can wait with the trace level: a search's first pass
+// requiring all its conditions, with a level below the trace that can reject.
+func (p *pass) deferTraces() bool {
+	if p.drv != nil || !p.all || p.spanOnly || !p.isActive(lvTrace) {
+		return false
+	}
+	for _, l := range []int{lvRes, lvScope, lvSpan} {
+		if p.isActive(l) && p.lv[l].rejects() {
+			return true
+		}
+	}
+	return p.isActive(lvEvent) || p.isActive(lvLink)
+}
+
+// candidates are the window-local spans the levels below the trace may keep: the narrowed
+// owner ranges, filtered by the span level (events and links included) when it can reject. A
+// superset where a level is not narrowed; first evaluates every level again.
+func (p *pass) candidates() []cg.Interval {
+	runs, narrowed, _ := p.spanRuns(false)
+	if !narrowed {
+		runs = []cg.Interval{{Lo: 0, Hi: p.w.n(cg.TSpans)}}
+	}
+	if !p.lv[lvSpan].rejects() && !p.active(lvEvent) && !p.active(lvLink) {
+		return runs
+	}
+	sp := getSpan()
+	defer putSpan(sp)
+	var rows []uint32
+	for _, r := range runs {
+		for s := r.Lo; s < r.Hi; s++ {
+			resetSpan(sp)
+			sp.row = s
+			if p.spanLevel(s, sp) {
+				rows = append(rows, s)
+			}
+		}
+	}
+	return rowIvs(rows)
+}
+
 func (p *pass) need(ld *loader) error {
 	for l := range p.lv {
 		p.act[l] = p.isActive(l)
 	}
 	for l := range p.lv {
-		if !p.active(l) {
+		if !p.active(l) || (l == lvTrace && p.skipTr) {
 			continue
 		}
 		lv := p.lv[l]
@@ -555,7 +700,7 @@ func (p *pass) need(ld *loader) error {
 			}
 		}
 	}
-	if p.timeStart != nil {
+	if p.timeStart != nil && !p.skipTr {
 		_ = p.timeStart.need(p, ld)
 		_ = p.timeEnd.need(p, ld)
 	}
@@ -586,7 +731,7 @@ func (p *pass) prepare() error {
 		k.prepare(w)
 	}
 	for l := range p.lv {
-		if !p.active(l) {
+		if !p.active(l) || (l == lvTrace && p.skipTr) {
 			continue
 		}
 		lv := p.lv[l]
@@ -601,7 +746,7 @@ func (p *pass) prepare() error {
 			}
 		}
 	}
-	if p.timeStart != nil {
+	if p.timeStart != nil && !p.skipTr {
 		if err := p.timeStart.prepare(p); err != nil {
 			return err
 		}
@@ -884,7 +1029,7 @@ func (p *pass) childrenSpanOnly(l, t int, kids kids, dst *[]attrVal) bool {
 
 // first runs the first pass over every span of the window and returns one spanset per trace.
 func (p *pass) first() ([]*traceql.Spanset, error) {
-	if err := p.load(); err != nil || p.none {
+	if err := p.loadFirst(); err != nil || p.none {
 		return nil, err
 	}
 	var (
@@ -901,7 +1046,10 @@ func (p *pass) first() ([]*traceql.Spanset, error) {
 		}
 		cur = nil
 	}
-	runs, narrowed, _ := p.spanRuns(false)
+	runs, narrowed := p.cand, p.cand != nil
+	if !narrowed {
+		runs, narrowed, _ = p.spanRuns(false)
+	}
 	if !narrowed {
 		runs = []cg.Interval{{Lo: 0, Hi: p.w.n(cg.TSpans)}}
 	}
