@@ -11,8 +11,9 @@ const (
 	// AttrPageBytes is the page size of the point-copy attribute tables, which are read whole.
 	AttrPageBytes = 4 << 20
 	// ChunkBytes bounds a group chunk: a page that would take the pending chunk (compressed
-	// pages + uncompressed dictionaries) past it starts the next chunk.
-	ChunkBytes = 2 << 20
+	// pages + uncompressed dictionaries) past it starts the next chunk. One 4 MiB read covers a
+	// whole chunk.
+	ChunkBytes = 4 << 20
 	// KmBytes bounds the buffered scan-copy entries of all levels together (exact bytes of the
 	// buffers); past it the level holding the most is flushed.
 	KmBytes = 256 << 20
