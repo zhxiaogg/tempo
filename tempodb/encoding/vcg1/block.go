@@ -62,13 +62,38 @@ func (b *backendBlock) reader(window int) (*cgfile.Reader, error) {
 }
 
 // request starts a request on the block: one read of exactly the footer and trailer, whose
-// sizes the block meta carries. Reads use the options' read buffer size as the window.
+// sizes the block meta carries, through the footer cache role (as vparquet5 reads its footer:
+// every job on the block and every trace-by-ID lookup past the bloom starts with it). Reads
+// use the options' read buffer size as the window.
 func (b *backendBlock) request(ctx context.Context, opts common.SearchOptions) (*cgfile.Request, error) {
 	rd, err := b.reader(opts.ReadBufferSize)
 	if err != nil {
 		return nil, err
 	}
-	return rd.NewRequest(ctx)
+	n := int(b.meta.FooterSize)
+	buf := make([]byte, n+cgfile.TrailerLen)
+	ci := &backend.CacheInfo{Meta: b.meta, Role: cache.RoleParquetFooter}
+	if err := b.r.ReadRange(ctx, cgfile.ObjectName, uuid.UUID(b.meta.BlockID), b.meta.TenantID, b.meta.Size_-uint64(len(buf)), buf, ci); err != nil {
+		return nil, fmt.Errorf("vCG1 block %s: reading footer: %w", b.meta.BlockID, err)
+	}
+	t, err := cgfile.ParseTrailer(buf[n:])
+	if err != nil {
+		return nil, err
+	}
+	if t.FooterLen != b.meta.FooterSize {
+		return nil, fmt.Errorf("vCG1 block %s: footer is %d bytes, meta says %d", b.meta.BlockID, t.FooterLen, b.meta.FooterSize)
+	}
+	dec, err := decoder()
+	if err != nil {
+		return nil, err
+	}
+	f, err := cgfile.DecodeFooter(dec, buf[:n])
+	if err != nil {
+		return nil, err
+	}
+	q := rd.NewRequestWithFooter(f)
+	q.CountRead(len(buf))
+	return q, nil
 }
 
 // shardCacheSize bounds the per-process cache of shard maps (one small entry per block,

@@ -28,6 +28,14 @@ type colKey struct{ t, c int }
 // Stats returns the backend requests issued so far.
 func (q *Request) Stats() Stats { return q.fetch.Stats }
 
+// CountRead adds a read of n bytes made outside the request (the footer, read through a
+// cache) to its stats.
+func (q *Request) CountRead(n int) {
+	q.fetch.Stats.Waves++
+	q.fetch.Stats.Requests++
+	q.fetch.Stats.Bytes += int64(n)
+}
+
 // Rows is the row count of table t.
 func (q *Request) Rows(t int) uint32 { return q.F.Rows[t] }
 
