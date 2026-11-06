@@ -1,0 +1,11 @@
+change_type: bug_fix
+
+component: storage
+
+note: Fix a querier panic in vParquet5 metrics queries with structural operators and no exemplars, e.g. instant `{ trace:id = "..." } !< { } | count_over_time()`, where the second pass repooled spans twice.
+
+issues: []
+
+subtext:
+
+user: zhxiaogg

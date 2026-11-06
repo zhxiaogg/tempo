@@ -1376,6 +1376,63 @@ func parse(t *testing.T, q string) traceql.Condition {
 	return req.Conditions[0]
 }
 
+// TestBackendBlockFetchSecondPassKeepsFirstPassSpans checks that the second pass returns every span
+// handed to it by the second pass callback. With trace-only first pass conditions the spans carry no
+// matched attributes, and the second pass used to drop and repool them while the callback's spanset
+// still owned them, returning them to the pool twice.
+func TestBackendBlockFetchSecondPassKeepsFirstPassSpans(t *testing.T) {
+	var traces []*Trace
+	for i := range 5 {
+		traces = append(traces, &Trace{
+			TraceID: test.ValidTraceID(nil),
+			ResourceSpans: []ResourceSpans{{
+				Resource: Resource{ServiceName: "svc"},
+				ScopeSpans: []ScopeSpans{{
+					Spans: []Span{{SpanID: []byte{byte(i), 1, 1, 1, 1, 1, 1, 1}, Name: "span", StartTimeUnixNano: 1000, DurationNano: 10}},
+				}},
+			}},
+		})
+	}
+	sort.Slice(traces, func(i, j int) bool { return bytes.Compare(traces[i].TraceID, traces[j].TraceID) < 0 })
+	b := makeBackendBlockWithTraces(t, traces)
+
+	ctx := context.Background()
+	handedToSecondPass := 0
+	req := traceql.FetchSpansRequest{
+		Conditions: []traceql.Condition{
+			// trace-level condition that matches nothing, as in { trace:id = "..." } !< { }
+			{
+				Attribute: traceql.NewIntrinsic(traceql.IntrinsicTraceID),
+				Op:        traceql.OpEqual,
+				Operands:  traceql.Operands{traceql.NewStaticString("00000000000000000000000000000001")},
+			},
+		},
+		SecondPass: func(s *traceql.Spanset) ([]*traceql.Spanset, error) {
+			handedToSecondPass += len(s.Spans)
+			return []*traceql.Spanset{s}, nil
+		},
+		// span-only, fetch-only second pass conditions, as for an instant metrics query without exemplars
+		SecondPassConditions: []traceql.Condition{{Attribute: traceql.NewIntrinsic(traceql.IntrinsicSpanStartTime)}},
+	}
+
+	resp, err := b.Fetch(ctx, req, common.DefaultSearchOptions())
+	require.NoError(t, err)
+	defer resp.Results.Close()
+
+	returned := 0
+	for {
+		ss, err := resp.Results.Next(ctx)
+		require.NoError(t, err)
+		if ss == nil {
+			break
+		}
+		returned += len(ss.Spans)
+	}
+
+	require.Positive(t, handedToSecondPass)
+	require.Equal(t, handedToSecondPass, returned)
+}
+
 // testSampler is a keep-all traceql.Sampler that records how many values it
 // was offered (Sample) and the population reported to it (Expect). Keeping every
 // value means results are identical to running without a sampler, so any non-zero
