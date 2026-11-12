@@ -38,7 +38,7 @@ func getPartitionWriter(t *testing.T, concurrency int) *writer {
 	})
 	require.NoError(t, err)
 
-	return newPartitionSectionWriter(logger, partition, startOffset, startTime, cycleDuration, slackDuration, concurrency, blockCfg, &mockOverrides{}, w, encoding.DefaultEncoding())
+	return newPartitionSectionWriter(logger, partition, startOffset, startTime, cycleDuration, slackDuration, concurrency, blockCfg, &mockOverrides{}, w, []encoding.VersionedEncoding{encoding.DefaultEncoding()})
 }
 
 func TestPushBytes(t *testing.T) {

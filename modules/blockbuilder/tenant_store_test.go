@@ -1,14 +1,20 @@
 package blockbuilder
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"testing"
 	"time"
 
 	"github.com/go-kit/log"
+	"github.com/grafana/tempo/v3/pkg/tempopb"
 	"github.com/grafana/tempo/v3/pkg/util/test"
 	"github.com/grafana/tempo/v3/tempodb/backend"
 	"github.com/grafana/tempo/v3/tempodb/encoding"
+	"github.com/grafana/tempo/v3/tempodb/encoding/common"
+	"github.com/grafana/tempo/v3/tempodb/encoding/vparquet4"
+	"github.com/grafana/tempo/v3/tempodb/encoding/vparquet5"
 	"github.com/grafana/tempo/v3/tempodb/wal"
 	"github.com/stretchr/testify/require"
 )
@@ -33,7 +39,7 @@ func getTenantStore(t *testing.T, startTime time.Time, cycleDuration, slackDurat
 		Version:        encoding.DefaultEncoding().Version(),
 	})
 	require.NoError(t, err)
-	return newTenantStore("test-tenant", partition, startOffset, startTime, cycleDuration, slackDuration, blockCfg, logger, w, encoding.DefaultEncoding(), &mockOverrides{})
+	return newTenantStore("test-tenant", partition, startOffset, startTime, cycleDuration, slackDuration, blockCfg, logger, w, []encoding.VersionedEncoding{encoding.DefaultEncoding()}, &mockOverrides{})
 }
 
 func TestTenantStoreAdjustTimeRangeForSlack(t *testing.T) {
@@ -238,4 +244,147 @@ func TestTenantStoreNoCompactFlag(t *testing.T) {
 	require.EqualValues(t, count, actualMeta.TotalObjects)
 	require.EqualValues(t, 1, actualMeta.TotalRecords)
 	require.Greater(t, actualMeta.Size_, uint64(0))
+}
+
+// getTenantStoreWithEncodings is getTenantStore writing every flush once per encoding.
+func getTenantStoreWithEncodings(t *testing.T, startTime time.Time, encs []encoding.VersionedEncoding) *tenantStore {
+	blockCfg := BlockConfig{}
+	blockCfg.RegisterFlagsAndApplyDefaults("", &flag.FlagSet{})
+	blockCfg.BlockConfig.RegisterFlagsAndApplyDefaults("", &flag.FlagSet{})
+	blockCfg.Version = encs[0].Version()
+
+	w, err := wal.New(&wal.Config{Filepath: t.TempDir(), IngestionSlack: 3 * time.Minute, Version: encoding.DefaultEncoding().Version()})
+	require.NoError(t, err)
+	ts, err := newTenantStore("test-tenant", 1, 1, startTime, 5*time.Minute, 5*time.Minute, blockCfg, log.NewNopLogger(), w, encs, &mockOverrides{})
+	require.NoError(t, err)
+	return ts
+}
+
+func dualEncodings(t *testing.T) []encoding.VersionedEncoding {
+	var encs []encoding.VersionedEncoding
+	for _, v := range []string{vparquet4.VersionString, vparquet5.VersionString} {
+		enc, err := encoding.FromVersionForWrites(v)
+		require.NoError(t, err)
+		encs = append(encs, enc)
+	}
+	return encs
+}
+
+// appendTraces pushes count requests of 3 traces each and returns their ids.
+func appendTraces(t *testing.T, ts *tenantStore, startTime time.Time, count int) [][]byte {
+	var ids [][]byte
+	for range count {
+		req := test.MakePushBytesRequest(t, 3, nil, uint64(startTime.UnixNano()), uint64(startTime.Add(time.Minute).UnixNano()))
+		for j := range req.Traces {
+			require.NoError(t, ts.AppendTrace(req.Ids[j], req.Traces[j].Slice, startTime))
+			ids = append(ids, req.Ids[j])
+		}
+	}
+	return ids
+}
+
+func TestTenantStoreFlushSecondaryVersion(t *testing.T) {
+	ctx := t.Context()
+	store := newStoreWithLogger(ctx, t, log.NewNopLogger())
+	startTime := time.Now().Add(-24 * time.Hour)
+
+	ts := getTenantStoreWithEncodings(t, startTime, dualEncodings(t))
+	ids := appendTraces(t, ts, startTime, 3)
+	require.NoError(t, ts.Flush(ctx, store, store, store))
+
+	store.PollNow(ctx)
+	metas := store.BlockMetas(ts.tenantID)
+	require.Len(t, metas, 2)
+	versions := map[string]*backend.BlockMeta{}
+	for _, m := range metas {
+		versions[m.Version] = m
+	}
+	require.Contains(t, versions, vparquet4.VersionString)
+	require.Contains(t, versions, vparquet5.VersionString)
+	require.NotEqual(t, metas[0].BlockID, metas[1].BlockID)
+	require.Equal(t, metas[0].TotalObjects, metas[1].TotalObjects)
+	require.ElementsMatch(t, []backend.UUID{metas[0].BlockID, metas[1].BlockID}, store.NoCompactBlocks(ts.tenantID))
+
+	for _, m := range metas {
+		resp, _, err := store.Find(ctx, ts.tenantID, &tempopb.TraceByIDRequest{TraceID: ids[0], QueryMode: "blocks", BlockStart: "00000000000000000000000000000000", BlockEnd: "ffffffffffffffffffffffffffffffff", Blocks: backend.TraceByIDBlocksFromMetas([]*backend.BlockMeta{m})}, common.DefaultSearchOptions())
+		require.NoError(t, err)
+		found := false
+		for _, r := range resp {
+			found = found || r.GetTrace() != nil
+		}
+		require.True(t, found, "trace in the %s block", m.Version)
+	}
+
+	require.NoError(t, ts.AllowCompaction(ctx, store))
+	store.PollNow(ctx)
+	require.Empty(t, store.NoCompactBlocks(ts.tenantID))
+}
+
+func TestTenantStoreFlushSecondaryVersionReplay(t *testing.T) {
+	ctx := t.Context()
+	store := newStoreWithLogger(ctx, t, log.NewNopLogger())
+	startTime := time.Now().Add(-24 * time.Hour)
+
+	first := getTenantStoreWithEncodings(t, startTime, dualEncodings(t))
+	appendTraces(t, first, startTime, 2)
+	require.NoError(t, first.Flush(ctx, store, store, store))
+	store.PollNow(ctx)
+	before := store.BlockMetas(first.tenantID)
+	require.Len(t, before, 2)
+
+	// the same partition, offset and start: the same id sequence, as a replayed cycle
+	replay := getTenantStoreWithEncodings(t, startTime, dualEncodings(t))
+	appendTraces(t, replay, startTime, 2)
+	require.NoError(t, replay.Flush(ctx, store, store, store))
+	store.PollNow(ctx)
+
+	after := store.BlockMetas(replay.tenantID)
+	require.Len(t, after, 2)
+	got := map[string]bool{}
+	for _, m := range after {
+		got[m.Version] = true
+		for _, b := range before {
+			require.NotEqual(t, b.BlockID, m.BlockID)
+		}
+	}
+	require.Equal(t, map[string]bool{vparquet4.VersionString: true, vparquet5.VersionString: true}, got)
+	for _, b := range before {
+		_, compacted, err := store.BlockMeta(ctx, replay.tenantID, b.BlockID)
+		require.NoError(t, err)
+		require.NotNil(t, compacted, "block %s of the first flush is compacted", b.Version)
+	}
+}
+
+// failingEncoding fails every CreateBlock.
+type failingEncoding struct{ encoding.VersionedEncoding }
+
+func (failingEncoding) CreateBlock(context.Context, *common.BlockConfig, *backend.BlockMeta, common.Iterator, backend.Reader, backend.Writer) (*backend.BlockMeta, error) {
+	return nil, errors.New("secondary write failed")
+}
+
+func TestTenantStoreFlushSecondaryFails(t *testing.T) {
+	ctx := t.Context()
+	store := newStoreWithLogger(ctx, t, log.NewNopLogger())
+	startTime := time.Now().Add(-24 * time.Hour)
+
+	encs := dualEncodings(t)
+	encs[1] = failingEncoding{encs[1]}
+	ts := getTenantStoreWithEncodings(t, startTime, encs)
+	appendTraces(t, ts, startTime, 1)
+	require.ErrorContains(t, ts.Flush(ctx, store, store, store), "secondary write failed")
+}
+
+func TestTenantStoreFlushPrimaryOnly(t *testing.T) {
+	ctx := t.Context()
+	store := newStoreWithLogger(ctx, t, log.NewNopLogger())
+	startTime := time.Now().Add(-24 * time.Hour)
+
+	ts := getTenantStoreWithEncodings(t, startTime, []encoding.VersionedEncoding{encoding.DefaultEncoding()})
+	appendTraces(t, ts, startTime, 2)
+	require.NoError(t, ts.Flush(ctx, store, store, store))
+	store.PollNow(ctx)
+	metas := store.BlockMetas(ts.tenantID)
+	require.Len(t, metas, 1)
+	require.Equal(t, encoding.DefaultEncoding().Version(), metas[0].Version)
+	require.Equal(t, []backend.UUID{metas[0].BlockID}, store.NoCompactBlocks(ts.tenantID))
 }

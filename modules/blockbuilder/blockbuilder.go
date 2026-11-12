@@ -109,8 +109,8 @@ type BlockBuilder struct {
 	partitionRing         ring.PartitionRingReader
 
 	overrides Overrides
-	enc       encoding.VersionedEncoding
-	wal       *wal.WAL // TODO - Shared between tenants, should be per tenant?
+	encs      []encoding.VersionedEncoding // the primary, then the optional secondary
+	wal       *wal.WAL                     // TODO - Shared between tenants, should be per tenant?
 
 	reader    tempodb.Reader
 	writer    tempodb.Writer
@@ -184,9 +184,19 @@ func (b *BlockBuilder) starting(ctx context.Context) (err error) {
 	level.Info(b.logger).Log("msg", "block builder starting")
 	topic := b.cfg.IngestStorageConfig.Kafka.Topic
 
-	b.enc, err = encoding.FromVersionForWrites(b.cfg.BlockConfig.Version)
-	if err != nil {
-		return fmt.Errorf("failed to create encoding: %w", err)
+	if err := validateSecondaryVersion(b.cfg.BlockConfig.Version, b.cfg.BlockConfig.SecondaryVersion); err != nil {
+		return err
+	}
+	b.encs = nil
+	for _, v := range []string{b.cfg.BlockConfig.Version, b.cfg.BlockConfig.SecondaryVersion} {
+		if v == "" {
+			continue
+		}
+		enc, err := encoding.FromVersionForWrites(v)
+		if err != nil {
+			return fmt.Errorf("failed to create encoding: %w", err)
+		}
+		b.encs = append(b.encs, enc)
 	}
 
 	b.wal, err = wal.New(&b.cfg.WAL)
@@ -427,7 +437,7 @@ outer:
 					b.cfg.BlockConfig,
 					b.overrides,
 					b.wal,
-					b.enc,
+					b.encs,
 				)
 				init = true
 

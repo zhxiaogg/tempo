@@ -145,3 +145,10 @@ func TestConfig_partitionAssignment(t *testing.T) {
 		})
 	}
 }
+
+func TestBlockConfigSecondaryVersion(t *testing.T) {
+	require.NoError(t, validateSecondaryVersion("vParquet4", ""))
+	require.NoError(t, validateSecondaryVersion("vParquet4", "vParquet5"))
+	require.ErrorContains(t, validateSecondaryVersion("vParquet4", "vParquet4"), "vParquet4")
+	require.ErrorContains(t, validateSecondaryVersion("vParquet4", "vNope"), "vNope")
+}
