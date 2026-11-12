@@ -42,22 +42,22 @@ var metricBlockBuilderFlushSize = promauto.NewHistogram(prometheus.HistogramOpts
 })
 
 type tenantStore struct {
-	tenantID         string
-	idGenerator      util.IDGenerator
-	cfg              BlockConfig
-	startTime        time.Time
-	cycleDuration    time.Duration
-	slackDuration    time.Duration
-	logger           log.Logger
-	overrides        Overrides
-	enc              encoding.VersionedEncoding
-	wal              *wal.WAL
-	noCompactBlockID *backend.UUID
+	tenantID          string
+	idGenerator       util.IDGenerator
+	cfg               BlockConfig
+	startTime         time.Time
+	cycleDuration     time.Duration
+	slackDuration     time.Duration
+	logger            log.Logger
+	overrides         Overrides
+	encs              []encoding.VersionedEncoding // the primary, then the optional secondary
+	wal               *wal.WAL
+	noCompactBlockIDs []backend.UUID
 
 	liveTraces *livetraces.LiveTraces[[]byte]
 }
 
-func newTenantStore(tenantID string, partitionID, startOffset uint64, startTime time.Time, cycleDuration, slackDuration time.Duration, cfg BlockConfig, logger log.Logger, wal *wal.WAL, enc encoding.VersionedEncoding, o Overrides) (*tenantStore, error) {
+func newTenantStore(tenantID string, partitionID, startOffset uint64, startTime time.Time, cycleDuration, slackDuration time.Duration, cfg BlockConfig, logger log.Logger, wal *wal.WAL, encs []encoding.VersionedEncoding, o Overrides) (*tenantStore, error) {
 	cfg.CreateWithNoCompactFlag = true // blockbuilder creates blocks with the nocompact flag set by default
 
 	s := &tenantStore{
@@ -70,7 +70,7 @@ func newTenantStore(tenantID string, partitionID, startOffset uint64, startTime 
 		logger:        logger,
 		overrides:     o,
 		wal:           wal,
-		enc:           enc,
+		encs:          encs,
 		liveTraces:    livetraces.New(func(b []byte) uint64 { return uint64(len(b)) }, 0, 0, tenantID), // passing 0s for max idle and live time b/c block builder doesn't cut idle traces
 	}
 
@@ -123,6 +123,23 @@ func (s *tenantStore) Flush(ctx context.Context, r tempodb.Reader, w tempodb.Wri
 		return nil
 	}
 
+	// One block per encoding from the same live traces. Each takes the next id of the
+	// deterministic sequence, so a replayed cycle walks and compacts every earlier copy.
+	for i, enc := range s.encs {
+		if err := s.flushBlock(ctx, r, w, c, enc, i == 0, i < len(s.encs)-1); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// flushBlock writes the live traces as one block of enc's version. first records the
+// deduped spans, which every block of the flush would otherwise count again; keep leaves the
+// live traces for the next block.
+func (s *tenantStore) flushBlock(ctx context.Context, r tempodb.Reader, w tempodb.Writer, c tempodb.Compactor, enc encoding.VersionedEncoding, first, keep bool) error {
+	ctx, span := tracer.Start(ctx, "tenantStore.flushBlock", trace.WithAttributes(attribute.String("version", enc.Version())))
+	defer span.End()
+
 	blockID, existingBlocksToBeCompacted, err := s.determineBlockIDs(ctx, r)
 	if err != nil {
 		return err
@@ -145,7 +162,7 @@ func (s *tenantStore) Flush(ctx context.Context, r tempodb.Reader, w tempodb.Wri
 	}
 
 	// Initial meta for creating the block
-	meta := backend.NewBlockMeta(s.tenantID, uuid.UUID(blockID), s.enc.Version())
+	meta := backend.NewBlockMeta(s.tenantID, uuid.UUID(blockID), enc.Version())
 	meta.DedicatedColumns = s.getDedicatedColumns()
 	meta.ReplicationFactor = 1
 	meta.TotalObjects = int64(s.liveTraces.Len())
@@ -155,7 +172,7 @@ func (s *tenantStore) Flush(ctx context.Context, r tempodb.Reader, w tempodb.Wri
 		l      = s.wal.LocalBackend()
 		reader = backend.NewReader(l)
 		writer = backend.NewWriter(l)
-		iter   = newLiveTracesIter(s.liveTraces)
+		iter   = newLiveTracesIter(s.liveTraces, keep)
 	)
 
 	level.Info(s.logger).Log(
@@ -165,15 +182,17 @@ func (s *tenantStore) Flush(ctx context.Context, r tempodb.Reader, w tempodb.Wri
 		"meta", meta,
 	)
 
-	newMeta, err := s.enc.CreateBlock(ctx, &s.cfg.BlockConfig, meta, iter, reader, writer)
+	newMeta, err := enc.CreateBlock(ctx, &s.cfg.BlockConfig, meta, iter, reader, writer)
 	if err != nil {
 		return err
 	}
 
-	if n, err := iter.DedupedSpans(); err != nil {
-		level.Error(s.logger).Log("msg", "failed to get deduped spans count", "err", err)
-	} else if n > 0 {
-		metricDedupedSpans.WithLabelValues(s.tenantID).Add(float64(n))
+	if first {
+		if n, err := iter.DedupedSpans(); err != nil {
+			level.Error(s.logger).Log("msg", "failed to get deduped spans count", "err", err)
+		} else if n > 0 {
+			metricDedupedSpans.WithLabelValues(s.tenantID).Add(float64(n))
+		}
 	}
 
 	// Update meta timestamps which couldn't be known until we unmarshaled
@@ -181,7 +200,7 @@ func (s *tenantStore) Flush(ctx context.Context, r tempodb.Reader, w tempodb.Wri
 	start, end := iter.MinMaxTimestamps()
 	newMeta.StartTime, newMeta.EndTime = s.adjustTimeRangeForSlack(time.Unix(0, int64(start)), time.Unix(0, int64(end)))
 
-	newBlock, err := s.enc.OpenBlock(newMeta, reader)
+	newBlock, err := enc.OpenBlock(newMeta, reader)
 	if err != nil {
 		return err
 	}
@@ -190,7 +209,7 @@ func (s *tenantStore) Flush(ctx context.Context, r tempodb.Reader, w tempodb.Wri
 		span.RecordError(err)
 		return err
 	}
-	s.noCompactBlockID = &newMeta.BlockID
+	s.noCompactBlockIDs = append(s.noCompactBlockIDs, newMeta.BlockID)
 	span.AddEvent("wrote block to backend", trace.WithAttributes(attribute.String("block_id", newMeta.BlockID.String())))
 
 	metricBlockBuilderFlushedBlocks.WithLabelValues(s.tenantID).Inc()
@@ -213,13 +232,12 @@ func (s *tenantStore) Flush(ctx context.Context, r tempodb.Reader, w tempodb.Wri
 }
 
 func (s *tenantStore) AllowCompaction(ctx context.Context, w tempodb.Writer) error {
-	if s.noCompactBlockID == nil {
-		return nil // no block to allow compaction for
+	for len(s.noCompactBlockIDs) > 0 {
+		if err := w.DeleteNoCompactFlag(ctx, s.tenantID, s.noCompactBlockIDs[0]); err != nil {
+			return err
+		}
+		s.noCompactBlockIDs = s.noCompactBlockIDs[1:]
 	}
-	if err := w.DeleteNoCompactFlag(ctx, s.tenantID, *s.noCompactBlockID); err != nil {
-		return err
-	}
-	s.noCompactBlockID = nil
 
 	return nil
 }

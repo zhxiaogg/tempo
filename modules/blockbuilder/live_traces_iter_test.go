@@ -26,7 +26,7 @@ func TestLiveTracesIter_DedupSpans(t *testing.T) {
 	lt.Push(traceID, trBytes, 0)
 	lt.Push(traceID, trBytes, 0)
 
-	iter := newLiveTracesIter(lt)
+	iter := newLiveTracesIter(lt, false)
 	ctx := context.Background()
 
 	id, resultTr, err := iter.Next(ctx)
@@ -82,7 +82,7 @@ func TestLiveTracesIter_DedupDropsEmptiedScopes(t *testing.T) {
 		lt.Push(traceID, b, 0)
 	}
 
-	iter := newLiveTracesIter(lt)
+	iter := newLiveTracesIter(lt, false)
 	ctx := context.Background()
 
 	_, resultTr, err := iter.Next(ctx)
@@ -113,9 +113,39 @@ func TestLiveTracesIter_DedupedSpans_ErrorWhenNotExhausted(t *testing.T) {
 		lt.Push(traceID, trBytes, 0)
 	}
 
-	iter := newLiveTracesIter(lt)
+	iter := newLiveTracesIter(lt, false)
 	iter.Close() // cancel before exhausting
 
 	_, err := iter.DedupedSpans() // blocks until iter() exits, then returns error
 	require.Error(t, err)
+}
+
+func TestLiveTracesIter_KeepLeavesTracesForAnotherPass(t *testing.T) {
+	lt := livetraces.New(func(b []byte) uint64 { return uint64(len(b)) }, 0, 0, "test-tenant")
+	for range 3 {
+		traceID := generateTraceID(t)
+		trBytes, err := test.MakeTraceWithSpanCount(1, 2, traceID).Marshal()
+		require.NoError(t, err)
+		lt.Push(traceID, trBytes, 0)
+	}
+	ctx := context.Background()
+	drainIDs := func(iter *liveTracesIter) [][]byte {
+		var ids [][]byte
+		for {
+			id, tr, err := iter.Next(ctx)
+			require.NoError(t, err)
+			if tr == nil {
+				return ids
+			}
+			ids = append(ids, append([]byte(nil), id...))
+		}
+	}
+
+	first := drainIDs(newLiveTracesIter(lt, true))
+	require.Len(t, first, 3)
+	require.Equal(t, 3, int(lt.Len()), "a keeping pass leaves every trace")
+
+	second := drainIDs(newLiveTracesIter(lt, false))
+	require.Equal(t, first, second, "the next pass reads the same traces")
+	require.Zero(t, lt.Len(), "a releasing pass frees them")
 }

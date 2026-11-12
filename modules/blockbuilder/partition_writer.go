@@ -37,13 +37,13 @@ type writer struct {
 
 	overrides Overrides
 	wal       *wal.WAL
-	enc       encoding.VersionedEncoding
+	encs      []encoding.VersionedEncoding
 
 	mtx sync.Mutex
 	m   map[string]*tenantStore
 }
 
-func newPartitionSectionWriter(logger log.Logger, partition, firstOffset uint64, startTime time.Time, cycleDuration, slackDuration time.Duration, concurrency int, blockCfg BlockConfig, overrides Overrides, wal *wal.WAL, enc encoding.VersionedEncoding) *writer {
+func newPartitionSectionWriter(logger log.Logger, partition, firstOffset uint64, startTime time.Time, cycleDuration, slackDuration time.Duration, concurrency int, blockCfg BlockConfig, overrides Overrides, wal *wal.WAL, encs []encoding.VersionedEncoding) *writer {
 	return &writer{
 		logger:           logger,
 		partition:        partition,
@@ -55,7 +55,7 @@ func newPartitionSectionWriter(logger log.Logger, partition, firstOffset uint64,
 		blockCfg:         blockCfg,
 		overrides:        overrides,
 		wal:              wal,
-		enc:              enc,
+		encs:             encs,
 		mtx:              sync.Mutex{},
 		m:                make(map[string]*tenantStore),
 	}
@@ -142,7 +142,7 @@ func (p *writer) instanceForTenant(tenant string) (*tenantStore, error) {
 		return i, nil
 	}
 
-	i, err := newTenantStore(tenant, p.partition, p.startOffset, p.startTime, p.cycleDuration, p.slackDuration, p.blockCfg, p.logger, p.wal, p.enc, p.overrides)
+	i, err := newTenantStore(tenant, p.partition, p.startOffset, p.startTime, p.cycleDuration, p.slackDuration, p.blockCfg, p.logger, p.wal, p.encs, p.overrides)
 	if err != nil {
 		return nil, err
 	}
