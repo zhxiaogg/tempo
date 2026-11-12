@@ -17,8 +17,12 @@ const urlParamBlockFormat = "blockFormat"
 // the blockFormat URL parameter, else def. "" means every version. hints and r may be nil.
 func resolveBlockFormat(hints *traceql.Hints, r *http.Request, def string) (string, error) {
 	v := def
-	if s, ok := hints.Get(traceql.HintBlockFormat, traceql.TypeString, false); ok {
-		v = s.EncodeToString(false)
+	if h := blockFormatHint(hints); h != nil {
+		// a hint must name a format: an empty or non-string one would read every version
+		if h.Value.Type != traceql.TypeString || h.Value.EncodeToString(false) == "" {
+			return "", fmt.Errorf("invalid %s hint %s: want a block version string", traceql.HintBlockFormat, h.Value.EncodeToString(true))
+		}
+		v = h.Value.EncodeToString(false)
 	} else if r != nil {
 		if p := r.URL.Query().Get(urlParamBlockFormat); p != "" {
 			v = p
@@ -47,4 +51,17 @@ func withBlockFormat(version string, next func(*backend.BlockMeta) bool) func(*b
 		return next
 	}
 	return func(m *backend.BlockMeta) bool { return m.Version == version && next(m) }
+}
+
+// blockFormatHint returns the block_format hint, of any type, or nil.
+func blockFormatHint(hints *traceql.Hints) *traceql.Hint {
+	if hints == nil {
+		return nil
+	}
+	for _, h := range hints.Hints {
+		if h.Name == traceql.HintBlockFormat {
+			return h
+		}
+	}
+	return nil
 }

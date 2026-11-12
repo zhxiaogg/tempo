@@ -388,3 +388,35 @@ func TestTenantStoreFlushPrimaryOnly(t *testing.T) {
 	require.Equal(t, encoding.DefaultEncoding().Version(), metas[0].Version)
 	require.Equal(t, []backend.UUID{metas[0].BlockID}, store.NoCompactBlocks(ts.tenantID))
 }
+
+func TestTenantStoreFlushReplayAfterSecondaryFails(t *testing.T) {
+	ctx := t.Context()
+	store := newStoreWithLogger(ctx, t, log.NewNopLogger())
+	startTime := time.Now().Add(-24 * time.Hour)
+
+	encs := dualEncodings(t)
+	encs[1] = failingEncoding{encs[1]}
+	failed := getTenantStoreWithEncodings(t, startTime, encs)
+	appendTraces(t, failed, startTime, 2)
+	require.Error(t, failed.Flush(ctx, store, store, store))
+	store.PollNow(ctx)
+	orphans := store.BlockMetas(failed.tenantID)
+	require.Len(t, orphans, 1, "the primary was written before the secondary failed")
+
+	// the retried cycle: same id sequence, both formats now succeed
+	replay := getTenantStoreWithEncodings(t, startTime, dualEncodings(t))
+	appendTraces(t, replay, startTime, 2)
+	require.NoError(t, replay.Flush(ctx, store, store, store))
+	store.PollNow(ctx)
+
+	after := store.BlockMetas(replay.tenantID)
+	got := map[string]bool{}
+	for _, m := range after {
+		require.NotEqual(t, orphans[0].BlockID, m.BlockID)
+		got[m.Version] = true
+	}
+	require.Equal(t, map[string]bool{vcg1.VersionString: true, vparquet5.VersionString: true}, got)
+	_, compacted, err := store.BlockMeta(ctx, replay.tenantID, orphans[0].BlockID)
+	require.NoError(t, err)
+	require.NotNil(t, compacted, "the orphaned primary is compacted")
+}
