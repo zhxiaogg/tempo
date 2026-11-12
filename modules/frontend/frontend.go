@@ -145,6 +145,13 @@ func New(cfg Config, next pipeline.RoundTripper, o overrides.Interface, reader t
 		return nil, fmt.Errorf("QueryBackendAfter (%v) must be greater than query end cutoff (%v)", cfg.Search.Sharder.QueryBackendAfter, cfg.QueryEndCutoff)
 	}
 
+	if err := validateBlockFormat(cfg.DefaultBlockFormat); err != nil {
+		return nil, fmt.Errorf("frontend default_block_format: %w", err)
+	}
+	cfg.Search.Sharder.DefaultBlockFormat = cfg.DefaultBlockFormat
+	cfg.Metrics.Sharder.DefaultBlockFormat = cfg.DefaultBlockFormat
+	cfg.TraceByID.DefaultBlockFormat = cfg.DefaultBlockFormat
+
 	jobsPerQuery := promauto.With(registerer).NewHistogramVec(prometheus.HistogramOpts{
 		Name:                            "tempo_query_frontend_jobs_per_query",
 		Help:                            "Number of planned jobs per query in the query frontend.",

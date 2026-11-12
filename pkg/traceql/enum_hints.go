@@ -24,11 +24,12 @@ const (
 	HintSkipASTTransformations = "skip_ast_transformations" // list of AST transformation names to skip; unsafe hint
 	HintNewFetch               = "spanonly_fetch"           // metrics: new fetch layer (only in vParquet5)
 	HintExtrapolate            = "extrapolate"              // metrics: scale counts by per-span sampling probability from tracestate
+	HintBlockFormat            = "block_format"             // frontend: read only backend blocks of this block version
 )
 
 func isUnsafe(h string) bool {
 	switch h {
-	case HintSample, HintTraceSample, HintSpanSample, HintExemplars, HintMostRecent, HintExtrapolate:
+	case HintSample, HintTraceSample, HintSpanSample, HintExemplars, HintMostRecent, HintExtrapolate, HintBlockFormat:
 		return false
 	default:
 		return true

@@ -113,7 +113,7 @@ func newMetricsRangeLimiter(cfg Config, o overrides.Interface, reader tempodb.Re
 		overrides: o,
 
 		reader:   reader,
-		filterFn: isRF1Block,
+		filterFn: withBlockFormat(cfg.DefaultBlockFormat, isRF1Block),
 
 		metrics: metricsRangeLimitMetrics,
 	}
