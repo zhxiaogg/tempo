@@ -78,7 +78,12 @@ func (s asyncTraceSharder) RoundTrip(pipelineRequest pipeline.Request) (pipeline
 		return pipeline.NewBadRequest(err), nil
 	}
 
-	reqs, err := s.buildShardedRequests(pipelineRequest, traceByIDReq)
+	blockFormat, err := resolveBlockFormat(nil, pipelineRequest.HTTPRequest(), s.cfg.DefaultBlockFormat)
+	if err != nil {
+		return pipeline.NewBadRequest(err), nil
+	}
+
+	reqs, err := s.buildShardedRequests(pipelineRequest, traceByIDReq, blockFormat)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +140,7 @@ func (s *asyncTraceSharder) blockBoundariesForTenant(numBlocks int) [][]byte {
 
 // buildShardedRequests returns a slice of requests sharded on block boundaries.
 // The boundaries come from blockBoundariesForTenant, sized from the blocks the jobs carry.
-func (s *asyncTraceSharder) buildShardedRequests(parent pipeline.Request, traceByIDReq *tempopb.TraceByIDRequest) ([]pipeline.Request, error) {
+func (s *asyncTraceSharder) buildShardedRequests(parent pipeline.Request, traceByIDReq *tempopb.TraceByIDRequest, blockFormat string) ([]pipeline.Request, error) {
 	userID, err := validation.ExtractValidTenantID(parent.Context())
 	if err != nil {
 		return nil, err
@@ -143,6 +148,15 @@ func (s *asyncTraceSharder) buildShardedRequests(parent pipeline.Request, traceB
 
 	// sorted by block id so each shard's blocks are one contiguous range
 	blocks := s.reader.TraceByIDBlockMetas(parent.Context(), userID, traceByIDReq.Start, traceByIDReq.End)
+	if blockFormat != "" {
+		kept := make([]*backend.BlockMeta, 0, len(blocks))
+		for _, m := range blocks {
+			if m.Version == blockFormat {
+				kept = append(kept, m)
+			}
+		}
+		blocks = kept
+	}
 	slices.SortFunc(blocks, func(a, b *backend.BlockMeta) int {
 		return bytes.Compare(a.BlockID[:], b.BlockID[:])
 	})

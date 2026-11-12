@@ -2,6 +2,7 @@ package frontend
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/gogo/protobuf/jsonpb"
+	"github.com/gogo/protobuf/proto"
+	"github.com/gorilla/mux"
 	"github.com/grafana/dskit/user"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
@@ -23,6 +26,7 @@ import (
 	"github.com/grafana/tempo/v3/modules/frontend/pipeline"
 	"github.com/grafana/tempo/v3/modules/overrides"
 	"github.com/grafana/tempo/v3/pkg/api"
+	pkgapi "github.com/grafana/tempo/v3/pkg/api"
 	"github.com/grafana/tempo/v3/pkg/tempopb"
 	"github.com/grafana/tempo/v3/pkg/traceql"
 	"github.com/grafana/tempo/v3/tempodb/backend"
@@ -248,6 +252,119 @@ func TestQueryRangeSharderBlockFormat(t *testing.T) {
 			}
 			require.Nil(t, bad)
 			require.Equal(t, tc.want, rec.read())
+		})
+	}
+}
+
+var paramFormatCases = []struct {
+	name   string
+	param  string
+	def    string
+	want   []string
+	status int
+}{
+	{name: "param", param: "vParquet5", def: "vParquet4", want: []string{"vParquet5"}},
+	{name: "default", def: "vParquet4", want: []string{"vParquet4"}},
+	{name: "param without default", param: "vParquet5", want: []string{"vParquet5"}},
+	{name: "neither", want: []string{"vParquet4", "vParquet5"}},
+	{name: "unknown param", param: "bogus", def: "vParquet4", status: http.StatusBadRequest},
+}
+
+func TestTagsSharderBlockFormat(t *testing.T) {
+	o, err := overrides.NewOverrides(overrides.Config{}, nil, prometheus.NewRegistry())
+	require.NoError(t, err)
+
+	for _, api := range []struct {
+		name  string
+		path  string
+		parse parseRequestFunction
+		body  proto.Message
+	}{
+		{"tags", "/api/v2/search/tags", parseTagsRequest, &tempopb.SearchTagsV2Response{}},
+		{"tag values", "/api/v2/search/tag/span.foo/values", parseTagValuesRequestV2, &tempopb.SearchTagValuesV2Response{}},
+	} {
+		body, err := (&jsonpb.Marshaler{}).MarshalToString(api.body)
+		require.NoError(t, err)
+		for _, tc := range paramFormatCases {
+			t.Run(api.name+"/"+tc.name, func(t *testing.T) {
+				now := time.Now()
+				metas := formatMetas(now)
+				rec := newBlockRecorder(metas)
+				sharder := newAsyncTagSharder(&mockReader{metas: metas}, o, SearchSharderConfig{
+					ConcurrentRequests:    defaultConcurrentRequests,
+					TargetBytesPerRequest: defaultTargetBytesPerRequest,
+					QueryBackendAfter:     time.Hour,
+					DefaultBlockFormat:    tc.def,
+				}, api.parse, newJobsPerQueryHistogram(), log.NewNopLogger())
+
+				path := fmt.Sprintf("%s?start=%d&end=%d", api.path, now.Add(-3*time.Hour).Unix(), now.Add(-80*time.Minute).Unix())
+				if tc.param != "" {
+					path += "&blockFormat=" + tc.param
+				}
+				req := httptest.NewRequest("GET", path, nil)
+				req = mux.SetURLVars(req, map[string]string{pkgapi.MuxVarTagName: "span.foo"})
+				req = req.WithContext(user.InjectOrgID(req.Context(), "test-tenant"))
+				resps, err := sharder.Wrap(rec.next(body)).RoundTrip(pipeline.NewHTTPRequest(req))
+				require.NoError(t, err)
+				bad := drain(t, resps)
+				if tc.status != 0 {
+					require.NotNil(t, bad)
+					return
+				}
+				require.Nil(t, bad)
+				require.Equal(t, tc.want, rec.read())
+			})
+		}
+	}
+}
+
+func TestTraceIDSharderBlockFormat(t *testing.T) {
+	for _, tc := range paramFormatCases {
+		t.Run(tc.name, func(t *testing.T) {
+			metas := formatMetas(time.Now())
+			var (
+				mtx   sync.Mutex
+				modes []string
+				seen  []string
+			)
+			next := pipeline.AsyncRoundTripperFunc[combiner.PipelineResponse](func(r pipeline.Request) (pipeline.Responses[combiner.PipelineResponse], error) {
+				q := r.HTTPRequest().URL.Query()
+				mtx.Lock()
+				defer mtx.Unlock()
+				modes = append(modes, q.Get("mode"))
+				if q.Has(pkgapi.BlocksKey) {
+					raw, err := base64.RawURLEncoding.DecodeString(q.Get(pkgapi.BlocksKey))
+					require.NoError(t, err)
+					blocks := &tempopb.TraceByIDBlocks{}
+					require.NoError(t, blocks.Unmarshal(raw))
+					for _, b := range blocks.Blocks {
+						seen = append(seen, b.Version)
+					}
+				}
+				return pipeline.NewHTTPToAsyncResponse(&http.Response{Body: io.NopCloser(strings.NewReader("")), StatusCode: 404}), nil
+			})
+			sharder := newAsyncTraceIDSharder(&TraceByIDConfig{QueryShards: 3, DefaultBlockFormat: tc.def}, 0, &mockReader{metas: metas}, newJobsPerQueryHistogram(), log.NewNopLogger())
+
+			path := "/api/traces/00000000000000000000000000000001"
+			if tc.param != "" {
+				path += "?blockFormat=" + tc.param
+			}
+			req := httptest.NewRequest("GET", path, nil)
+			req = mux.SetURLVars(req, map[string]string{"traceID": "00000000000000000000000000000001"})
+			req = req.WithContext(user.InjectOrgID(req.Context(), "test-tenant"))
+			resps, err := sharder.Wrap(next).RoundTrip(pipeline.NewHTTPRequest(req))
+			require.NoError(t, err)
+			bad := drain(t, resps)
+			if tc.status != 0 {
+				require.NotNil(t, bad)
+				return
+			}
+			require.Nil(t, bad)
+			mtx.Lock()
+			defer mtx.Unlock()
+			require.Contains(t, modes, "ingesters", "the live-store job is still sent")
+			slices.Sort(seen)
+			require.Equal(t, tc.want, slices.Compact(seen))
 		})
 	}
 }
