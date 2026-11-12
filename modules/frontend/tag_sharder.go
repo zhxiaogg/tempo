@@ -215,6 +215,10 @@ func (s searchTagSharder) RoundTrip(pipelineRequest pipeline.Request) (pipeline.
 	if err != nil {
 		return pipeline.NewBadRequest(err), nil
 	}
+	blockFormat, err := resolveBlockFormat(nil, r, s.cfg.DefaultBlockFormat)
+	if err != nil {
+		return pipeline.NewBadRequest(err), nil
+	}
 	ctx, span := tracer.Start(ctx, "frontend.ShardSearchTags")
 	defer span.End()
 	pipelineRequest.SetContext(ctx)
@@ -240,7 +244,7 @@ func (s searchTagSharder) RoundTrip(pipelineRequest pipeline.Request) (pipeline.
 		queryJobs = 1
 	}
 
-	queryJobs += s.backendRequests(ctx, tenantID, pipelineRequest, searchReq, reqCh, func(err error) {
+	queryJobs += s.backendRequests(ctx, tenantID, pipelineRequest, searchReq, blockFormat, reqCh, func(err error) {
 		// todo: actually find a way to return this error to the user
 		s.logger.Log("msg", "failed to build backend requests", "err", err)
 	})
@@ -256,7 +260,7 @@ func (s searchTagSharder) RoundTrip(pipelineRequest pipeline.Request) (pipeline.
 
 // backendRequest builds backend requests to search backend blocks. backendRequest takes ownership of reqCh and closes it.
 // it returns 3 int values: totalBlocks, totalBlockBytes, and estimated jobs
-func (s searchTagSharder) backendRequests(ctx context.Context, tenantID string, parent pipeline.Request, searchReq tagSearchReq, reqCh chan<- pipeline.Request, errFn func(error)) int {
+func (s searchTagSharder) backendRequests(ctx context.Context, tenantID string, parent pipeline.Request, searchReq tagSearchReq, blockFormat string, reqCh chan<- pipeline.Request, errFn func(error)) int {
 	// request without start or end, search only in ingester
 	if searchReq.start() == 0 || searchReq.end() == 0 {
 		close(reqCh)
@@ -275,7 +279,7 @@ func (s searchTagSharder) backendRequests(ctx context.Context, tenantID string, 
 	// get block metadata of blocks in start, end duration
 	startT := time.Unix(int64(start), 0)
 	endT := time.Unix(int64(end), 0)
-	blocks := blockMetasForSearch(s.reader.BlockMetas(tenantID), startT, endT, acceptAllBlocks)
+	blocks := blockMetasForSearch(s.reader.BlockMetas(tenantID), startT, endT, withBlockFormat(blockFormat, acceptAllBlocks))
 
 	targetBytesPerRequest := s.cfg.TargetBytesPerRequest
 	// the callback function is nil, so we will use it just for counting the total number of jobs
