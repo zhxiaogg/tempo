@@ -32,6 +32,7 @@ type chEntry struct {
 type liveTracesIter struct {
 	mtx          sync.Mutex
 	liveTraces   *livetraces.LiveTraces[[]byte]
+	keep         bool // leave the traces for another pass
 	ch           chan []chEntry
 	chBuf        []chEntry
 	cancel       func()
@@ -40,11 +41,14 @@ type liveTracesIter struct {
 	exhausted    bool
 }
 
-func newLiveTracesIter(liveTraces *livetraces.LiveTraces[[]byte]) *liveTracesIter {
+// newLiveTracesIter iterates liveTraces in trace-ID order. Unless keep is set it frees each
+// trace as it goes; a keeping pass leaves them for another pass.
+func newLiveTracesIter(liveTraces *livetraces.LiveTraces[[]byte], keep bool) *liveTracesIter {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	l := &liveTracesIter{
 		liveTraces: liveTraces,
+		keep:       keep,
 		ch:         make(chan []chEntry, 1),
 		cancel:     cancel,
 	}
@@ -155,8 +159,10 @@ func (i *liveTracesIter) iter(ctx context.Context) {
 			tr.ResourceSpans = resourceSpans
 			clear(seen)
 
-			tempopb.ReuseByteSlices(entry.Batches)
-			delete(i.liveTraces.Traces, e.hash)
+			if !i.keep {
+				tempopb.ReuseByteSlices(entry.Batches)
+				delete(i.liveTraces.Traces, e.hash)
+			}
 
 			output = append(output, chEntry{
 				id:  entry.ID,

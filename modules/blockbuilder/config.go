@@ -11,12 +11,15 @@ import (
 
 	"github.com/grafana/tempo/v3/pkg/ingest"
 	"github.com/grafana/tempo/v3/pkg/util/log"
+	"github.com/grafana/tempo/v3/tempodb/encoding"
 	"github.com/grafana/tempo/v3/tempodb/encoding/common"
 	"github.com/grafana/tempo/v3/tempodb/wal"
 )
 
 type BlockConfig struct {
 	MaxBlockBytes uint64 `yaml:"max_block_bytes" doc:"Maximum size of a block."`
+	// SecondaryVersion, when set, writes every flushed block again in this block version.
+	SecondaryVersion string `yaml:"secondary_version" doc:"Block version every flushed block is also written in. Empty disables."`
 
 	// holds the block settings from the storage sections, it is not configurable via YAML
 	common.BlockConfig `yaml:"-"`
@@ -28,6 +31,7 @@ func (c *BlockConfig) RegisterFlags(f *flag.FlagSet) {
 
 func (c *BlockConfig) RegisterFlagsAndApplyDefaults(prefix string, f *flag.FlagSet) {
 	f.Uint64Var(&c.MaxBlockBytes, prefix+".max-block-bytes", 20*1024*1024, "Maximum size of a block.") // TODO - Review default
+	f.StringVar(&c.SecondaryVersion, prefix+".secondary-version", "", "Block version every flushed block is also written in. Empty disables.")
 }
 
 type Config struct {
@@ -124,4 +128,19 @@ func (p *partitionAssignmentVar) String() string {
 		return "map[]"
 	}
 	return fmt.Sprintf("%v", *p.p)
+}
+
+// validateSecondaryVersion accepts an empty secondary, or a writable block version other than
+// the primary.
+func validateSecondaryVersion(primary, secondary string) error {
+	if secondary == "" {
+		return nil
+	}
+	if secondary == primary {
+		return fmt.Errorf("block_builder.block.secondary_version %q is the primary block version", secondary)
+	}
+	if _, err := encoding.FromVersionForWrites(secondary); err != nil {
+		return fmt.Errorf("block_builder.block.secondary_version %q: %w", secondary, err)
+	}
+	return nil
 }
