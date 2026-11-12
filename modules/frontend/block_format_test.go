@@ -53,6 +53,8 @@ func TestResolveBlockFormat(t *testing.T) {
 		{name: "nil request and hints", def: "vCG1", want: "vCG1"},
 		{name: "unknown hint", hints: hints(`{} with(block_format="vparquet5")`), url: "/", wantErr: "vparquet5"},
 		{name: "unknown param", url: "/?blockFormat=cg", wantErr: "cg"},
+		{name: "empty hint", hints: hints(`{} with(block_format="")`), url: "/", def: "vCG1", wantErr: "block_format"},
+		{name: "hint of another type", hints: hints(`{} with(block_format=5)`), url: "/", def: "vCG1", wantErr: "block_format"},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
