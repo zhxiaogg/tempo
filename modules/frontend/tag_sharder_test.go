@@ -127,7 +127,7 @@ func TestTagsBackendRequestsDoNotHitBackendIfStartIsAfterQueryBackendAfter(t *te
 		startValue: uint32(startTime),
 		endValue:   uint32(endTime),
 	}
-	s.backendRequests(context.TODO(), "test", pipeline.NewHTTPRequest(r), &req, reqCh, func(_ error) {})
+	s.backendRequests(context.TODO(), "test", pipeline.NewHTTPRequest(r), &req, "", reqCh, func(_ error) {})
 
 	assert.Empty(t, reqCh)
 }
@@ -208,7 +208,7 @@ func TestTagsBackendRequests(t *testing.T) {
 				req.endValue = uint32(tc.params.end)
 
 			}
-			s.backendRequests(context.TODO(), "test", pipeline.NewHTTPRequest(r), &req, reqCh, func(err error) {
+			s.backendRequests(context.TODO(), "test", pipeline.NewHTTPRequest(r), &req, "", reqCh, func(err error) {
 				require.Equal(t, tc.expectedError, err)
 			})
 
@@ -273,7 +273,7 @@ func TestTagsBackendRequestsUseBlockMetadata(t *testing.T) {
 			}
 			requests := make(chan pipeline.Request)
 			requestErrors := make(chan error, 1)
-			jobs := sharder.backendRequests(context.Background(), "test", pipeline.NewHTTPRequest(parent), searchReq, requests, func(err error) {
+			jobs := sharder.backendRequests(context.Background(), "test", pipeline.NewHTTPRequest(parent), searchReq, "", requests, func(err error) {
 				requestErrors <- err
 			})
 			require.Equal(t, 2, jobs)
@@ -529,7 +529,7 @@ func TestTagsBackendRequestsForwardDedicatedColumns(t *testing.T) {
 			require.NoError(t, err)
 
 			reqCh := make(chan pipeline.Request)
-			s.backendRequests(context.TODO(), "test", pipeline.NewHTTPRequest(r), searchReq, reqCh, func(err error) {
+			s.backendRequests(context.TODO(), "test", pipeline.NewHTTPRequest(r), searchReq, "", reqCh, func(err error) {
 				require.NoError(t, err)
 			})
 

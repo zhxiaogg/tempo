@@ -29,7 +29,7 @@ func TestBuildShardedRequests(t *testing.T) {
 	ctx := user.InjectOrgID(context.Background(), "blerg")
 	req := httptest.NewRequest("GET", "/", nil).WithContext(ctx)
 
-	shardedReqs, err := sharder.buildShardedRequests(pipeline.NewHTTPRequest(req), &tempopb.TraceByIDRequest{})
+	shardedReqs, err := sharder.buildShardedRequests(pipeline.NewHTTPRequest(req), &tempopb.TraceByIDRequest{}, "")
 	require.NoError(t, err)
 	require.Len(t, shardedReqs, queryShards)
 
@@ -52,7 +52,7 @@ func TestBuildShardedRequestsWithExternal(t *testing.T) {
 	ctx := user.InjectOrgID(context.Background(), "blerg")
 	req := httptest.NewRequest("GET", "/", nil).WithContext(ctx)
 
-	shardedReqs, err := sharder.buildShardedRequests(pipeline.NewHTTPRequest(req), &tempopb.TraceByIDRequest{})
+	shardedReqs, err := sharder.buildShardedRequests(pipeline.NewHTTPRequest(req), &tempopb.TraceByIDRequest{}, "")
 	require.NoError(t, err)
 	require.Len(t, shardedReqs, queryShards)
 
@@ -132,7 +132,7 @@ func TestBuildShardedRequestsBlocksPerShard(t *testing.T) {
 			ctx := user.InjectOrgID(context.Background(), "test-tenant")
 			req := httptest.NewRequest("GET", "/", nil).WithContext(ctx)
 
-			shardedReqs, err := sharder.buildShardedRequests(pipeline.NewHTTPRequest(req), &tempopb.TraceByIDRequest{})
+			shardedReqs, err := sharder.buildShardedRequests(pipeline.NewHTTPRequest(req), &tempopb.TraceByIDRequest{}, "")
 			require.NoError(t, err)
 			require.Len(t, shardedReqs, tc.wantTotalShards, "total shards (ingester + block shards)")
 
@@ -230,7 +230,7 @@ func TestBlocksPerShardTimeRangeFiltering(t *testing.T) {
 			ctx := user.InjectOrgID(context.Background(), "test-tenant")
 			req := httptest.NewRequest("GET", "/", nil).WithContext(ctx)
 
-			shardedReqs, err := sharder.buildShardedRequests(pipeline.NewHTTPRequest(req), &tempopb.TraceByIDRequest{Start: tc.startTime, End: tc.endTime})
+			shardedReqs, err := sharder.buildShardedRequests(pipeline.NewHTTPRequest(req), &tempopb.TraceByIDRequest{Start: tc.startTime, End: tc.endTime}, "")
 			require.NoError(t, err)
 			require.Len(t, shardedReqs, tc.wantTotalShards)
 
@@ -313,7 +313,7 @@ func TestBlocksPerShardRespectsMaxOutstanding(t *testing.T) {
 			ctx := user.InjectOrgID(context.Background(), "test-tenant")
 			req := httptest.NewRequest("GET", "/", nil).WithContext(ctx)
 
-			shardedReqs, err := sharder.buildShardedRequests(pipeline.NewHTTPRequest(req), &tempopb.TraceByIDRequest{})
+			shardedReqs, err := sharder.buildShardedRequests(pipeline.NewHTTPRequest(req), &tempopb.TraceByIDRequest{}, "")
 			require.NoError(t, err)
 			require.Len(t, shardedReqs, tc.wantTotalShards)
 		})
@@ -336,7 +336,7 @@ func TestBlocksPerShardFallsBackToQueryShards(t *testing.T) {
 	ctx := user.InjectOrgID(context.Background(), "blerg")
 	req := httptest.NewRequest("GET", "/", nil).WithContext(ctx)
 
-	shardedReqs, err := sharder.buildShardedRequests(pipeline.NewHTTPRequest(req), &tempopb.TraceByIDRequest{})
+	shardedReqs, err := sharder.buildShardedRequests(pipeline.NewHTTPRequest(req), &tempopb.TraceByIDRequest{}, "")
 	require.NoError(t, err)
 	require.Len(t, shardedReqs, queryShards)
 
@@ -368,7 +368,7 @@ func TestBuildShardedRequestsAttachesBlocks(t *testing.T) {
 	ctx := user.InjectOrgID(context.Background(), "blerg")
 	req := httptest.NewRequest("GET", "/", nil).WithContext(ctx)
 
-	shardedReqs, err := sharder.buildShardedRequests(pipeline.NewHTTPRequest(req), &tempopb.TraceByIDRequest{})
+	shardedReqs, err := sharder.buildShardedRequests(pipeline.NewHTTPRequest(req), &tempopb.TraceByIDRequest{}, "")
 	require.NoError(t, err)
 	require.Len(t, shardedReqs, queryShards)
 
@@ -413,7 +413,7 @@ func TestBuildShardedRequestsIgnoresCallerParams(t *testing.T) {
 	ctx := user.InjectOrgID(context.Background(), "blerg")
 	req := httptest.NewRequest("GET", "/?mode=ingesters&blockStart=00000000000000000000000000000000&blockEnd=ffffffffffffffffffffffffffffffff&"+api.BlocksKey+"=callerblocks", nil).WithContext(ctx)
 
-	shardedReqs, err := sharder.buildShardedRequests(pipeline.NewHTTPRequest(req), &tempopb.TraceByIDRequest{})
+	shardedReqs, err := sharder.buildShardedRequests(pipeline.NewHTTPRequest(req), &tempopb.TraceByIDRequest{}, "")
 	require.NoError(t, err)
 	require.Len(t, shardedReqs, queryShards)
 
@@ -443,7 +443,7 @@ func TestBuildShardedRequestsWithoutBlockShards(t *testing.T) {
 	ctx := user.InjectOrgID(context.Background(), "blerg")
 	req := httptest.NewRequest("GET", "/", nil).WithContext(ctx)
 
-	shardedReqs, err := sharder.buildShardedRequests(pipeline.NewHTTPRequest(req), &tempopb.TraceByIDRequest{})
+	shardedReqs, err := sharder.buildShardedRequests(pipeline.NewHTTPRequest(req), &tempopb.TraceByIDRequest{}, "")
 	require.NoError(t, err)
 	require.Len(t, shardedReqs, 2)
 }
@@ -492,7 +492,7 @@ func TestBlocksPerShardCountsRecentlyCompactedBlocks(t *testing.T) {
 	req := httptest.NewRequest("GET", "/", nil).WithContext(ctx)
 
 	// the jobs carry the compacted blocks too, so they count toward the shard size
-	shardedReqs, err := sharder.buildShardedRequests(pipeline.NewHTTPRequest(req), &tempopb.TraceByIDRequest{})
+	shardedReqs, err := sharder.buildShardedRequests(pipeline.NewHTTPRequest(req), &tempopb.TraceByIDRequest{}, "")
 	require.NoError(t, err)
 	require.Len(t, shardedReqs, 4) // 1 ingester + 3 block shards
 }
