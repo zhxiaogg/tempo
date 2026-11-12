@@ -45,6 +45,7 @@ type queryRangeSharder struct {
 }
 
 type QueryRangeSharderConfig struct {
+	DefaultBlockFormat    string        `yaml:"-"` // from Config.DefaultBlockFormat
 	ConcurrentRequests    int           `yaml:"concurrent_jobs,omitempty"`
 	TargetBytesPerRequest int           `yaml:"target_bytes_per_job,omitempty"`
 	MaxDuration           time.Duration `yaml:"max_duration"`
@@ -99,6 +100,11 @@ func (s queryRangeSharder) RoundTrip(pipelineRequest pipeline.Request) (pipeline
 		return pipeline.NewBadRequest(err), nil
 	}
 
+	blockFormat, err := resolveBlockFormat(expr.Hints, r, s.cfg.DefaultBlockFormat)
+	if err != nil {
+		return pipeline.NewBadRequest(err), nil
+	}
+
 	if expr.IsNoop() {
 		// Empty response
 		ch := make(chan pipeline.Request, 2)
@@ -149,7 +155,7 @@ func (s queryRangeSharder) RoundTrip(pipelineRequest pipeline.Request) (pipeline
 		reqCh <- generatorReq
 	}
 
-	s.backendRequests(ctx, tenantID, pipelineRequest, *req, cutoff, targetBytesPerRequest, reqCh, jobMetadata)
+	s.backendRequests(ctx, tenantID, pipelineRequest, *req, blockFormat, cutoff, targetBytesPerRequest, reqCh, jobMetadata)
 
 	span.SetAttributes(attribute.Int64("totalJobs", int64(jobMetadata.TotalJobs)))
 	span.SetAttributes(attribute.Int64("totalBlocks", int64(jobMetadata.TotalBlocks)))
@@ -185,7 +191,7 @@ func (s *queryRangeSharder) exemplarsCutoff(req tempopb.QueryRangeRequest, cutof
 	return limit - shareAfterCutoffCeil, shareAfterCutoffCeil
 }
 
-func (s *queryRangeSharder) backendRequests(ctx context.Context, tenantID string, parent pipeline.Request, searchReq tempopb.QueryRangeRequest, cutoff time.Time, targetBytesPerRequest int, reqCh chan pipeline.Request, jobMetadata *combiner.QueryRangeJobResponse) {
+func (s *queryRangeSharder) backendRequests(ctx context.Context, tenantID string, parent pipeline.Request, searchReq tempopb.QueryRangeRequest, blockFormat string, cutoff time.Time, targetBytesPerRequest int, reqCh chan pipeline.Request, jobMetadata *combiner.QueryRangeJobResponse) {
 	// request without start or end, search only in generator
 	if searchReq.Start == 0 || searchReq.End == 0 {
 		close(reqCh)
@@ -208,7 +214,7 @@ func (s *queryRangeSharder) backendRequests(ctx context.Context, tenantID string
 	// range is checked for each window.
 	start := time.Unix(0, int64(backendReq.Start))
 	end := time.Unix(0, int64(backendReq.End))
-	blocks := blockMetasForSearch(s.reader.BlockMetas(tenantID), start, end, isRF1Block)
+	blocks := blockMetasForSearch(s.reader.BlockMetas(tenantID), start, end, withBlockFormat(blockFormat, isRF1Block))
 	if len(blocks) == 0 {
 		// no need to search backend
 		close(reqCh)
