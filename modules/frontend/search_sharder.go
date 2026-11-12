@@ -36,6 +36,7 @@ const (
 )
 
 type SearchSharderConfig struct {
+	DefaultBlockFormat    string        `yaml:"-"` // from Config.DefaultBlockFormat
 	ConcurrentRequests    int           `yaml:"concurrent_jobs,omitempty"`
 	TargetBytesPerRequest int           `yaml:"target_bytes_per_job,omitempty"`
 	DefaultLimit          uint32        `yaml:"default_result_limit"`
@@ -98,6 +99,17 @@ func (s asyncSearchSharder) RoundTrip(pipelineRequest pipeline.Request) (pipelin
 
 	// adjust limit based on config
 	searchReq.Limit, err = adjustLimit(searchReq.Limit, s.cfg.DefaultLimit, s.cfg.MaxLimit)
+	if err != nil {
+		return pipeline.NewBadRequest(err), nil
+	}
+
+	var hints *traceql.Hints
+	if searchReq.Query != "" {
+		if expr, err := traceql.ParseNoOptimizations(searchReq.Query); err == nil {
+			hints = expr.Hints
+		}
+	}
+	blockFormat, err := resolveBlockFormat(hints, r, s.cfg.DefaultBlockFormat)
 	if err != nil {
 		return pipeline.NewBadRequest(err), nil
 	}
@@ -168,7 +180,7 @@ func (s asyncSearchSharder) RoundTrip(pipelineRequest pipeline.Request) (pipelin
 	}
 
 	// pass subCtx in requests so we can cancel and exit early
-	s.backendRequests(ctx, tenantID, pipelineRequest, searchReq, jobMetrics, reqCh, func(err error) {
+	s.backendRequests(ctx, tenantID, pipelineRequest, searchReq, blockFormat, jobMetrics, reqCh, func(err error) {
 		// todo: actually find a way to return this error to the user
 		s.logger.Log("msg", "search: failed to build backend requests", "err", err)
 	})
@@ -181,7 +193,7 @@ func (s asyncSearchSharder) RoundTrip(pipelineRequest pipeline.Request) (pipelin
 
 // backendRequest builds backend requests to search backend blocks. backendRequest takes ownership of reqCh and closes it.
 // it returns 3 int values: totalBlocks, totalBlockBytes, and estimated jobs
-func (s *asyncSearchSharder) backendRequests(ctx context.Context, tenantID string, parent pipeline.Request, searchReq *tempopb.SearchRequest, resp *combiner.SearchJobResponse, reqCh chan<- pipeline.Request, errFn func(error)) {
+func (s *asyncSearchSharder) backendRequests(ctx context.Context, tenantID string, parent pipeline.Request, searchReq *tempopb.SearchRequest, blockFormat string, resp *combiner.SearchJobResponse, reqCh chan<- pipeline.Request, errFn func(error)) {
 	// request without start or end, search only in ingester
 	if searchReq.Start == 0 || searchReq.End == 0 {
 		close(reqCh)
@@ -200,7 +212,7 @@ func (s *asyncSearchSharder) backendRequests(ctx context.Context, tenantID strin
 	startT := time.Unix(int64(start), 0)
 	endT := time.Unix(int64(end), 0)
 
-	blocks := blockMetasForSearch(s.reader.BlockMetas(tenantID), startT, endT, acceptAllBlocks)
+	blocks := blockMetasForSearch(s.reader.BlockMetas(tenantID), startT, endT, withBlockFormat(blockFormat, acceptAllBlocks))
 
 	// calculate metrics to return to the caller
 	resp.TotalBlocks = len(blocks)
@@ -324,7 +336,7 @@ var _ rangeLimiter = (*searchRangeLimiter)(nil)
 func newSearchRangeLimiter(cfg SearchSharderConfig, o overrides.Interface, reader tempodb.Reader) *searchRangeLimiter {
 	return &searchRangeLimiter{
 		reader:    reader,
-		filterFn:  acceptAllBlocks,
+		filterFn:  withBlockFormat(cfg.DefaultBlockFormat, acceptAllBlocks),
 		metrics:   searchRangeLimitMetrics,
 		cfg:       cfg,
 		overrides: o,

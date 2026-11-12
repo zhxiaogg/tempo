@@ -57,6 +57,10 @@ type Config struct {
 	// SkipASTTransformations is a list of AST transformation names to disable globally.
 	// Valid names: "or_to_in". Use "all" to disable all transformations.
 	SkipASTTransformations []string `yaml:"skip_ast_transformations,omitempty"`
+
+	// DefaultBlockFormat is the block version a request reads from the backend when it names
+	// none (block_format hint or blockFormat parameter). Empty reads every version.
+	DefaultBlockFormat string `yaml:"default_block_format,omitempty"`
 }
 
 type MCPServerConfig struct {
@@ -77,11 +81,12 @@ type SearchConfig struct {
 }
 
 type TraceByIDConfig struct {
-	QueryShards      int       `yaml:"query_shards,omitempty"`
-	ConcurrentShards int       `yaml:"concurrent_shards,omitempty"`
-	BlocksPerShard   uint      `yaml:"blocks_per_shard,omitempty"` // BlocksPerShard is used to dynamically create shards based on the number of blocks instead of the fixed amount in QueryShards. Set to 0 to disable and fall back to QueryShards.
-	SLO              SLOConfig `yaml:",inline"`
-	ExternalEnabled  bool      `yaml:"external_enabled,omitempty"`
+	DefaultBlockFormat string    `yaml:"-"` // from Config.DefaultBlockFormat
+	QueryShards        int       `yaml:"query_shards,omitempty"`
+	ConcurrentShards   int       `yaml:"concurrent_shards,omitempty"`
+	BlocksPerShard     uint      `yaml:"blocks_per_shard,omitempty"` // BlocksPerShard is used to dynamically create shards based on the number of blocks instead of the fixed amount in QueryShards. Set to 0 to disable and fall back to QueryShards.
+	SLO                SLOConfig `yaml:",inline"`
+	ExternalEnabled    bool      `yaml:"external_enabled,omitempty"`
 
 	// SpanPruningEnabledByDefault makes span pruning default to enabled for trace-by-id v2
 	// requests that don't set their own span_pruning param. An explicit span_pruning value in
@@ -165,6 +170,7 @@ func (cfg *Config) RegisterFlagsAndApplyDefaults(prefix string, f *flag.FlagSet)
 	// enabling an mcp server opens the door to send tracing data to an LLM. it should require
 	// explicit enabling. registers a flag in addition to YAML configuration.
 	f.BoolVar(&cfg.MCPServer.Enabled, util.PrefixConfig(prefix, "mcp-server.enabled"), false, "Set to true to enable the MCP server")
+	f.StringVar(&cfg.DefaultBlockFormat, util.PrefixConfig(prefix, "default-block-format"), "", "Block version requests read from the backend when they name none. Empty reads every version.")
 	f.BoolVar(&cfg.QueryTracker.Enabled, util.PrefixConfig(prefix, "query-tracker.enabled"), false, "Set to true to enable query tracking and active query status pages")
 	f.IntVar(&cfg.QueryTracker.MaxQueriesPerTenant, util.PrefixConfig(prefix, "query-tracker.max-queries-per-tenant"), cfg.QueryTracker.MaxQueriesPerTenant, "Maximum active queries tracked per tenant")
 	f.IntVar(&cfg.QueryTracker.MaxQueryTextBytes, util.PrefixConfig(prefix, "query-tracker.max-query-text-bytes"), cfg.QueryTracker.MaxQueryTextBytes, "Maximum bytes of query text retained for an active query")
