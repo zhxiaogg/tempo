@@ -44,7 +44,8 @@ func decoder() (*zstd.Decoder, error) {
 }
 
 // reader opens block.cg (no I/O: the block meta carries the object and footer sizes). window
-// is the read window (<= 0: cgfile.DefaultWindow).
+// is the read window (<= 0: cgfile.DefaultWindow). Data reads go through the page cache role:
+// windows are aligned to chunk starts, so their keys repeat across queries.
 func (b *backendBlock) reader(window int) (*cgfile.Reader, error) {
 	if b.meta.Size_ == 0 || b.meta.FooterSize == 0 {
 		return nil, fmt.Errorf("vCG1 block %s: meta has no size/footerSize", b.meta.BlockID)
@@ -53,7 +54,7 @@ func (b *backendBlock) reader(window int) (*cgfile.Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	rr := cgfile.BackendRangeReader{R: b.r, Name: cgfile.ObjectName, BlockID: uuid.UUID(b.meta.BlockID), TenantID: b.meta.TenantID, CacheInfo: &backend.CacheInfo{Meta: b.meta}}
+	rr := cgfile.BackendRangeReader{R: b.r, Name: cgfile.ObjectName, BlockID: uuid.UUID(b.meta.BlockID), TenantID: b.meta.TenantID, CacheInfo: &backend.CacheInfo{Meta: b.meta, Role: cache.RoleParquetPage}}
 	opts := []cgfile.Option{cgfile.WithDecoder(dec)}
 	if window > 0 {
 		opts = append(opts, cgfile.WithWindow(int64(window)))
