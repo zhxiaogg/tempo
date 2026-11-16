@@ -192,7 +192,3 @@ func (b *backendBlock) FindTraceByID(ctx context.Context, id common.ID, opts com
 	}
 	return &tempopb.TraceByIDResponse{Trace: tr, Metrics: &tempopb.TraceByIDMetrics{InspectedBytes: uint64(q.Stats().Bytes)}}, nil
 }
-
-func (b *backendBlock) Search(context.Context, *tempopb.SearchRequest, common.SearchOptions) (*tempopb.SearchResponse, error) {
-	return &tempopb.SearchResponse{}, nil
-}
