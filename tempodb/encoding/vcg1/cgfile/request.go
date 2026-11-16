@@ -102,10 +102,10 @@ func (q *Request) Load(ctx context.Context, pages []PageSel, runs []RunRef) erro
 			if d := ch.Dicts[c.K]; d.Present() && !c.chunks[p.Chunk].loaded && !c.chunks[p.Chunk].wanted {
 				c.chunks[p.Chunk].wanted = true
 				dicts = append(dicts, dictNeed{c, int(p.Chunk)})
-				q.ranges = append(q.ranges, Range{Off: d.Off, Len: int64(d.Len), Region: ch.Region()})
+				q.ranges = append(q.ranges, Range{Off: d.Off, Len: int64(d.Len), Unit: ch.Unit()})
 			}
 			b := &p.Bufs[c.K]
-			q.ranges = append(q.ranges, Range{Off: b.Off, Len: int64(b.Len), Region: ch.Region()})
+			q.ranges = append(q.ranges, Range{Off: b.Off, Len: int64(b.Len), Unit: ch.Unit()})
 		}
 	}
 	for _, ref := range runs {
@@ -116,7 +116,7 @@ func (q *Request) Load(ctx context.Context, pages []PageSel, runs []RunRef) erro
 		if err != nil {
 			return err
 		}
-		q.ranges = append(q.ranges, Range{Off: run.Off, Len: int64(run.Len), Region: reg})
+		q.ranges = append(q.ranges, Range{Off: run.Off, Len: int64(run.Len), Unit: reg})
 	}
 	if err := q.fetch.Fetch(ctx, q.ranges); err != nil {
 		return err
@@ -185,14 +185,14 @@ func (q *Request) LoadRows(ctx context.Context, sels []RowSel) error {
 	return q.Load(ctx, ps, nil)
 }
 
-func (q *Request) bytes(off int64, n uint32, reg Region) ([]byte, error) {
-	return q.fetch.Bytes(Range{Off: off, Len: int64(n), Region: reg})
+func (q *Request) bytes(off int64, n uint32, reg Unit) ([]byte, error) {
+	return q.fetch.Bytes(Range{Off: off, Len: int64(n), Unit: reg})
 }
 
 func (q *Request) loadDict(c *Column, chunk int) error {
 	ch := &c.Group.Chunks[chunk]
 	d := ch.Dicts[c.K]
-	b, err := q.bytes(d.Off, d.Len, ch.Region())
+	b, err := q.bytes(d.Off, d.Len, ch.Unit())
 	if err != nil {
 		return err
 	}
@@ -221,7 +221,7 @@ func (q *Request) decodePage(c *Column, pi int) error {
 	p := &c.Group.Pages[pi]
 	ch := &c.Group.Chunks[p.Chunk]
 	b := &p.Bufs[c.K]
-	data, err := q.bytes(b.Off, b.Len, ch.Region())
+	data, err := q.bytes(b.Off, b.Len, ch.Unit())
 	if err != nil {
 		return err
 	}

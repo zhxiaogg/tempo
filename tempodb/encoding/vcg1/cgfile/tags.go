@@ -69,7 +69,7 @@ func (q *Request) VisitColumn(ctx context.Context, t, c int, lo, hi uint32, useD
 			ch := &g.Chunks[ci]
 			d := ch.Dicts[col.K]
 			if withPages[ci] {
-				ranges = append(ranges, Range{Off: d.Off, Len: int64(d.Len), Region: ch.Region()})
+				ranges = append(ranges, Range{Off: d.Off, Len: int64(d.Len), Unit: ch.Unit()})
 				continue
 			}
 			b, err := q.fetch.ReadExact(ctx, d.Off, int(d.Len))
@@ -92,7 +92,7 @@ func (q *Request) VisitColumn(ctx context.Context, t, c int, lo, hi uint32, useD
 			b, ok := exact[ci]
 			if !ok {
 				var err error
-				if b, err = q.bytes(d.Off, d.Len, ch.Region()); err != nil {
+				if b, err = q.bytes(d.Off, d.Len, ch.Unit()); err != nil {
 					return err
 				}
 			}
@@ -146,7 +146,7 @@ type RunValues struct {
 func (q *Request) RunDistinct(ctx context.Context, refs []RunRef) ([]RunValues, error) {
 	type head struct {
 		run *Run
-		reg Region
+		reg Unit
 		n   int64
 	}
 	heads := make([]head, len(refs))
@@ -157,7 +157,7 @@ func (q *Request) RunDistinct(ctx context.Context, refs []RunRef) ([]RunValues, 
 			return nil, err
 		}
 		heads[i] = head{run: run, reg: reg, n: min(int64(run.Len), runHeaderProbe)}
-		ranges = append(ranges, Range{Off: run.Off, Len: heads[i].n, Region: reg})
+		ranges = append(ranges, Range{Off: run.Off, Len: heads[i].n, Unit: reg})
 	}
 	if err := q.fetch.Fetch(ctx, ranges); err != nil {
 		return nil, err
@@ -174,7 +174,7 @@ func (q *Request) RunDistinct(ctx context.Context, refs []RunRef) ([]RunValues, 
 			return nil, fmt.Errorf("cgfile: run %+v: %w", refs[i], err)
 		}
 		if rb == nil { // header longer than the probe
-			if err := q.fetch.Fetch(ctx, []Range{{Off: h.run.Off, Len: need, Region: h.reg}}); err != nil {
+			if err := q.fetch.Fetch(ctx, []Range{{Off: h.run.Off, Len: need, Unit: h.reg}}); err != nil {
 				return nil, err
 			}
 			if b, err = q.bytes(h.run.Off, uint32(need), h.reg); err != nil {
@@ -189,9 +189,9 @@ func (q *Request) RunDistinct(ctx context.Context, refs []RunRef) ([]RunValues, 
 			continue
 		}
 		if rb.Val.Encoding() == EncRLEDict && rb.Dict.Present() {
-			ranges = append(ranges, Range{Off: rb.Dict.Off, Len: int64(rb.Dict.Len), Region: h.reg})
+			ranges = append(ranges, Range{Off: rb.Dict.Off, Len: int64(rb.Dict.Len), Unit: h.reg})
 		} else {
-			ranges = append(ranges, Range{Off: rb.Val.Off, Len: int64(rb.Val.Len), Region: h.reg})
+			ranges = append(ranges, Range{Off: rb.Val.Off, Len: int64(rb.Val.Len), Unit: h.reg})
 		}
 	}
 	if err := q.fetch.Fetch(ctx, ranges); err != nil {

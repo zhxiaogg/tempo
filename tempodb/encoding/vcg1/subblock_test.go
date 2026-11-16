@@ -142,6 +142,7 @@ type roleRecorder struct {
 	mu    sync.Mutex
 	roles []cache.Role
 	offs  []uint64
+	lens  []int
 }
 
 func (r *roleRecorder) ReadRange(ctx context.Context, name string, id uuid.UUID, tenant string, off uint64, b []byte, ci *backend.CacheInfo) error {
@@ -151,7 +152,7 @@ func (r *roleRecorder) ReadRange(ctx context.Context, name string, id uuid.UUID,
 		if ci != nil {
 			role = ci.Role
 		}
-		r.roles, r.offs = append(r.roles, role), append(r.offs, off)
+		r.roles, r.offs, r.lens = append(r.roles, role), append(r.offs, off), append(r.lens, len(b))
 		r.mu.Unlock()
 	}
 	return r.Reader.ReadRange(ctx, name, id, tenant, off, b, ci)
@@ -189,4 +190,47 @@ func TestFooterReadUsesFooterCache(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, cache.RoleParquetFooter, rec.roles[0])
 	require.Equal(t, footerOff, rec.offs[0])
+}
+
+// TestDataReadsUsePageCache: every read of block.cg past the footer goes through the page cache
+// role, and reads land on the same chunk-aligned windows whatever the query: two reads of
+// different queries either are the same request or do not overlap (stable cache keys).
+func TestDataReadsUsePageCache(t *testing.T) {
+	ctx := context.Background()
+	traces := cgtest.Traces(600, 5)
+	s := newStore(t)
+	cm := createAnchored(t, s, traces, 50)
+	footerOff := cm.Size_ - uint64(cm.FooterSize) - cg.TrailerLen
+
+	type read struct{ off, n uint64 }
+	run := func(q string) []read {
+		rec := &roleRecorder{Reader: s.r}
+		blk, err := encoding.OpenBlock(cm, rec)
+		require.NoError(t, err)
+		f := traceql.NewSpansetFetcherWrapper(func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansResponse, error) {
+			return blk.Fetch(ctx, req, common.DefaultSearchOptions())
+		})
+		_, err = traceql.NewEngine().ExecuteSearch(ctx, &tempopb.SearchRequest{Query: q, Limit: 1000}, f)
+		require.NoError(t, err)
+		var out []read
+		for i, off := range rec.offs {
+			if off == footerOff {
+				require.Equal(t, cache.RoleParquetFooter, rec.roles[i])
+				continue
+			}
+			require.Equal(t, cache.RoleParquetPage, rec.roles[i], "read at %d", off)
+			out = append(out, read{off, uint64(rec.lens[i])})
+		}
+		require.NotEmpty(t, out, q)
+		return out
+	}
+	a := run(`{ resource.service.name = "api" }`)
+	b := run(`{ span.http.route = "/api/v1/a" && duration > 1ns }`)
+	for _, x := range a {
+		for _, y := range b {
+			if x.off < y.off+y.n && y.off < x.off+x.n {
+				require.Equal(t, x, y, "overlapping reads of two queries must be the same request")
+			}
+		}
+	}
 }

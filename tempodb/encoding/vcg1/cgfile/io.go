@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"sort"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // RangeReader reads len(buf) bytes of the block object at off.
@@ -15,17 +17,19 @@ type RangeReader interface {
 // buffered reader, so backend requests are (at most) 1 MiB windows of the chunk.
 const DefaultWindow = 1 << 20
 
-// Region is a contiguous byte region a window may span: a run of back-to-back chunks of a
-// group, or the runs of one key in a key-major flush. Windows never cross its end.
-type Region struct {
+// Unit is the bytes a range is read and cached through: its group chunk, or the runs of one
+// key in a key-major flush. Windows start at the unit start and step by the window size, so the
+// same bytes are always read by the same backend request, whatever the query (stable cache
+// keys); a unit no larger than the window is one request.
+type Unit struct {
 	Off, End int64
 }
 
-// Range is a byte range a caller needs, tagged with the region it lies in.
+// Range is a byte range a caller needs, tagged with the unit it lies in.
 type Range struct {
-	Off    int64
-	Len    int64
-	Region Region
+	Off  int64
+	Len  int64
+	Unit Unit
 }
 
 // Stats counts the backend requests of one request.
@@ -42,10 +46,9 @@ func (s *Stats) Add(o Stats) {
 	s.Waves += o.Waves
 }
 
-// Fetcher is a per-request read cache. A range is read through windows of up to the window
-// size starting at its first byte not yet held (capped at its region end and at the next held
-// window); each window is fetched once and kept for the rest of the request. Not safe for
-// concurrent use.
+// Fetcher is a per-request read cache. A range is read through the windows of its unit's grid
+// that hold its bytes; each window is fetched once and kept for the rest of the request. Not
+// safe for concurrent use.
 type Fetcher struct {
 	r       RangeReader
 	window  int64
@@ -72,9 +75,12 @@ func NewFetcher(r RangeReader, windowSize int64) *Fetcher {
 	return &Fetcher{r: r, window: windowSize}
 }
 
+// fetchConcurrency bounds the backend requests of one wave in flight.
+const fetchConcurrency = 8
+
 func checkRange(r Range) error {
-	if r.Off < r.Region.Off || r.Off+r.Len > r.Region.End {
-		return fmt.Errorf("cgfile: range [%d,+%d) outside its region [%d,%d)", r.Off, r.Len, r.Region.Off, r.Region.End)
+	if r.Off < r.Unit.Off || r.Off+r.Len > r.Unit.End {
+		return fmt.Errorf("cgfile: range [%d,+%d) outside its unit [%d,%d)", r.Off, r.Len, r.Unit.Off, r.Unit.End)
 	}
 	return nil
 }
@@ -85,7 +91,7 @@ func (f *Fetcher) at(off int64) int {
 }
 
 // Fetch reads, as one wave, the windows covering the ranges that the request does not hold
-// yet. Windows are issued sequentially in offset order (one request in flight).
+// yet, up to fetchConcurrency at a time.
 func (f *Fetcher) Fetch(ctx context.Context, ranges []Range) error {
 	rs := make([]Range, 0, len(ranges))
 	for _, r := range ranges {
@@ -100,36 +106,46 @@ func (f *Fetcher) Fetch(ctx context.Context, ranges []Range) error {
 	sort.Slice(rs, func(i, j int) bool { return rs[i].Off < rs[j].Off })
 	f.todo = f.todo[:0]
 	for _, r := range rs {
+		u := r.Unit
 		for p, end := r.Off, r.Off+r.Len; p < end; {
-			if n := len(f.todo); n > 0 && p < f.todo[n-1].end {
-				p = f.todo[n-1].end // planned windows are ascending: only the last can cover p
-				continue
-			}
-			i := f.at(p)
-			if i < len(f.windows) && f.windows[i].off <= p {
-				p = f.windows[i].end()
-				continue
-			}
-			e := min(p+f.window, r.Region.End)
-			if i < len(f.windows) {
-				e = min(e, f.windows[i].off)
-			}
-			f.todo = append(f.todo, window{p, e})
+			s := u.Off + (p-u.Off)/f.window*f.window
+			e := min(s+f.window, u.End)
 			p = e
+			// ranges are in offset order and units are disjoint: only the last planned window can
+			// be this one
+			if n := len(f.todo); n > 0 && f.todo[n-1].off == s {
+				continue
+			}
+			if i := f.at(s); i < len(f.windows) && f.windows[i].off == s {
+				continue
+			}
+			f.todo = append(f.todo, window{s, e})
 		}
 	}
 	if len(f.todo) == 0 {
 		return nil
 	}
 	f.Stats.Waves++
-	for _, w := range f.todo {
-		buf := make([]byte, w.end-w.off)
-		if err := f.r.ReadRange(ctx, w.off, buf); err != nil {
-			return fmt.Errorf("cgfile: read [%d,%d): %w", w.off, w.end, err)
-		}
+	bufs := make([][]byte, len(f.todo))
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(fetchConcurrency)
+	for i, w := range f.todo {
+		g.Go(func() error {
+			buf := make([]byte, w.end-w.off)
+			if err := f.r.ReadRange(gctx, w.off, buf); err != nil {
+				return fmt.Errorf("cgfile: read [%d,%d): %w", w.off, w.end, err)
+			}
+			bufs[i] = buf
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return err
+	}
+	for i, w := range f.todo {
 		f.Stats.Requests++
-		f.Stats.Bytes += int64(len(buf))
-		f.windows = append(f.windows, held{w.off, buf})
+		f.Stats.Bytes += int64(len(bufs[i]))
+		f.windows = append(f.windows, held{w.off, bufs[i]})
 	}
 	sort.Slice(f.windows, func(i, j int) bool { return f.windows[i].off < f.windows[j].off })
 	return nil
