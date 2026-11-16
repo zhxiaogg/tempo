@@ -100,17 +100,17 @@ func (q *Request) KeyRuns(l int, key uint32, o0, o1 uint32) ([]RunRef, error) {
 // Run returns a run loaded by Load (nil if not loaded).
 func (q *Request) Run(ref RunRef) *RunData { return q.runs[ref] }
 
-func (q *Request) runMeta(ref RunRef) (*Run, Region, error) {
+func (q *Request) runMeta(ref RunRef) (*Run, Unit, error) {
 	km, err := q.Km(ref.Level)
 	if err != nil {
-		return nil, Region{}, err
+		return nil, Unit{}, err
 	}
 	if ref.Flush < 0 || ref.Flush >= len(km) || ref.Run < 0 || ref.Run >= len(km[ref.Flush].Runs) {
-		return nil, Region{}, fmt.Errorf("cgfile: no run %+v", ref)
+		return nil, Unit{}, fmt.Errorf("cgfile: no run %+v", ref)
 	}
 	k := &km[ref.Flush]
 	r := &k.Runs[ref.Run]
-	return r, k.KeyRegion(r.Key), nil
+	return r, k.KeyUnit(r.Key), nil
 }
 
 func (q *Request) decodeRun(ref RunRef) (*RunData, error) {

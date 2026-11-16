@@ -77,12 +77,11 @@ type Chunk struct {
 	Len   int64
 	Dicts []DictDesc // per group column; zero = no dictionary
 	Pages []Page     // sub-slice of Group.Pages
-	run   Region     // the chunk's run of back-to-back chunks of the group
 }
 
-// Region is the region the chunk is read through: its run of back-to-back chunks of the
-// group, so one window can cover several chunks.
-func (c *Chunk) Region() Region { return c.run }
+// Unit is the unit the chunk is read through: the chunk itself, so reads align with its start
+// and end.
+func (c *Chunk) Unit() Unit { return Unit{Off: c.Off, End: c.Off + c.Len} }
 
 // Group is a decoded group section: every chunk of a group of a table.
 type Group struct {
@@ -171,17 +170,6 @@ func parseGroup(sec []byte, ncol int) (*Group, error) {
 	if err := streamsErr(&S); err != nil {
 		return nil, err
 	}
-	for a := 0; a < len(g.Chunks); {
-		b := a + 1
-		for b < len(g.Chunks) && g.Chunks[b].Off == g.Chunks[b-1].Off+g.Chunks[b-1].Len {
-			b++
-		}
-		run := Region{Off: g.Chunks[a].Off, End: g.Chunks[b-1].Off + g.Chunks[b-1].Len}
-		for i := a; i < b; i++ {
-			g.Chunks[i].run = run
-		}
-		a = b
-	}
 	return g, nil
 }
 
@@ -244,13 +232,13 @@ func (k *KmFlush) KeyRuns(key uint32) (int, int) {
 	return a, b
 }
 
-// KeyRegion is the byte region of every run of key id in the flush (they are adjacent).
-func (k *KmFlush) KeyRegion(key uint32) Region {
+// KeyUnit is the unit every run of key id in the flush is read through (they are adjacent).
+func (k *KmFlush) KeyUnit(key uint32) Unit {
 	a, b := k.KeyRuns(key)
 	if a == b {
-		return Region{}
+		return Unit{}
 	}
-	return Region{Off: k.Runs[a].Off, End: k.Runs[b-1].Off + int64(k.Runs[b-1].Len)}
+	return Unit{Off: k.Runs[a].Off, End: k.Runs[b-1].Off + int64(k.Runs[b-1].Len)}
 }
 
 // DecodeKm parses the key-major section of level l (nil if the level has none).

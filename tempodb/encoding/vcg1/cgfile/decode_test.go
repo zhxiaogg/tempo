@@ -2,6 +2,8 @@ package cgfile
 
 import (
 	"context"
+	"slices"
+	"sync"
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
@@ -105,7 +107,7 @@ func TestKmSection(t *testing.T) {
 		require.Equal(t, off, r.Off)
 		off += int64(r.Len)
 	}
-	require.Equal(t, Region{Off: k.Runs[2].Off, End: k.Runs[2].Off + 304605}, k.KeyRegion(2))
+	require.Equal(t, Unit{Off: k.Runs[2].Off, End: k.Runs[2].Off + 304605}, k.KeyUnit(2))
 }
 
 func TestRunHeader(t *testing.T) {
@@ -123,14 +125,24 @@ func TestRunHeader(t *testing.T) {
 }
 
 type memReader struct {
+	mu   sync.Mutex
 	b    []byte
 	reqs [][2]int64
 }
 
 func (m *memReader) ReadRange(_ context.Context, off int64, buf []byte) error {
+	m.mu.Lock()
 	m.reqs = append(m.reqs, [2]int64{off, int64(len(buf))})
+	m.mu.Unlock()
 	copy(buf, m.b[off:])
 	return nil
+}
+
+// sorted returns the requests from i on, in offset order (windows are read concurrently).
+func (m *memReader) sorted(i int) [][2]int64 {
+	out := slices.Clone(m.reqs[i:])
+	slices.SortFunc(out, func(a, b [2]int64) int { return int(a[0] - b[0]) })
+	return out
 }
 
 func TestFetcherWindows(t *testing.T) {
@@ -140,26 +152,32 @@ func TestFetcherWindows(t *testing.T) {
 	}
 	m := &memReader{b: data}
 	f := NewFetcher(m, 16)
-	reg := Region{Off: 10, End: 90}
-	ranges := []Range{{Off: 12, Len: 3, Region: reg}, {Off: 40, Len: 20, Region: reg}, {Off: 13, Len: 1, Region: reg}}
+	u := Unit{Off: 10, End: 90}
+	ranges := []Range{{Off: 12, Len: 3, Unit: u}, {Off: 40, Len: 20, Unit: u}, {Off: 13, Len: 1, Unit: u}}
 	require.NoError(t, f.Fetch(context.Background(), ranges))
-	// windows start at the first byte not held: [12,28) (also holds 13), [40,56), [56,72)
-	require.Equal(t, [][2]int64{{12, 16}, {40, 16}, {56, 16}}, m.reqs)
-	require.Equal(t, Stats{Requests: 3, Bytes: 48, Waves: 1}, f.Stats)
+	// windows lie on the unit's grid (its start + k*16): [10,26) holds 12..14 and 13; [26,42),
+	// [42,58) and [58,74) hold 40..59
+	require.Equal(t, [][2]int64{{10, 16}, {26, 16}, {42, 16}, {58, 16}}, m.sorted(0))
+	require.Equal(t, Stats{Requests: 4, Bytes: 64, Waves: 1}, f.Stats)
 	b, err := f.Bytes(ranges[1])
 	require.NoError(t, err)
 	require.Equal(t, data[40:60], b)
-	// held windows are not asked again; the last window is clipped to the region
-	require.NoError(t, f.Fetch(context.Background(), []Range{{Off: 41, Len: 49, Region: reg}}))
-	require.Equal(t, [][2]int64{{72, 16}, {88, 2}}, m.reqs[3:])
+	// held windows are not asked again; the last window is clipped to the unit end
+	require.NoError(t, f.Fetch(context.Background(), []Range{{Off: 41, Len: 49, Unit: u}}))
+	require.Equal(t, [][2]int64{{74, 16}}, m.sorted(4))
 	require.Equal(t, int64(2), f.Stats.Waves)
-	b, err = f.Bytes(Range{Off: 41, Len: 49, Region: reg})
+	b, err = f.Bytes(Range{Off: 41, Len: 49, Unit: u})
 	require.NoError(t, err)
 	require.Equal(t, data[41:90], b)
-	// a new window stops at the next held one
-	require.NoError(t, f.Fetch(context.Background(), []Range{{Off: 30, Len: 12, Region: reg}}))
-	require.Equal(t, [2]int64{30, 10}, m.reqs[5])
-	b, err = f.Bytes(Range{Off: 30, Len: 12, Region: reg})
-	require.NoError(t, err)
-	require.Equal(t, data[30:42], b)
+
+	// another request needing other bytes of the unit asks for the same windows (stable cache keys)
+	m2 := &memReader{b: data}
+	require.NoError(t, NewFetcher(m2, 16).Fetch(context.Background(), []Range{{Off: 45, Len: 2, Unit: u}}))
+	require.Equal(t, [][2]int64{{42, 16}}, m2.reqs)
+
+	// a unit smaller than the window is one read of the whole unit; windows never span two units
+	m3 := &memReader{b: data}
+	a, c := Unit{Off: 0, End: 20}, Unit{Off: 20, End: 50}
+	require.NoError(t, NewFetcher(m3, 64).Fetch(context.Background(), []Range{{Off: 15, Len: 3, Unit: a}, {Off: 21, Len: 3, Unit: c}}))
+	require.Equal(t, [][2]int64{{0, 20}, {20, 30}}, m3.sorted(0))
 }
