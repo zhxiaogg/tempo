@@ -48,19 +48,37 @@ var metricMetricsLiveStoreClients = promauto.NewGauge(prometheus.GaugeOpts{
 })
 
 // metricBackendProcessingDuration times how long the querier spends processing
-// backend blocks (vs recent live-store data), by operation and tenant.
+// backend blocks (vs recent live-store data), by operation, tenant and block version.
 var metricBackendProcessingDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 	Namespace:                       "tempo",
 	Name:                            "querier_backend_processing_duration_seconds",
-	Help:                            "Time the querier spends processing backend blocks (object-store scan + interleaved I/O), by operation and tenant. Excludes recent (live-store) data.",
+	Help:                            "Time the querier spends processing backend blocks (object-store scan + interleaved I/O), by operation, tenant and block version. Excludes recent (live-store) data.",
 	Buckets:                         prometheus.ExponentialBuckets(0.005, 4, 6),
 	NativeHistogramBucketFactor:     1.1,
 	NativeHistogramMaxBucketNumber:  100,
 	NativeHistogramMinResetDuration: time.Hour,
-}, []string{"operation", "tenant"})
+}, []string{"operation", "tenant", "version"})
 
-func observeBackendProcessing(operation, tenant string, start time.Time) {
-	metricBackendProcessingDuration.WithLabelValues(operation, tenant).Observe(time.Since(start).Seconds())
+func observeBackendProcessing(operation, tenant, version string, start time.Time) {
+	metricBackendProcessingDuration.WithLabelValues(operation, tenant, version).Observe(time.Since(start).Seconds())
+}
+
+// traceByIDBlocksVersion is the block version of a trace-by-ID job: its blocks' version,
+// "mixed" when they differ, "none" without blocks.
+func traceByIDBlocksVersion(blocks *tempopb.TraceByIDBlocks) string {
+	v := ""
+	for _, b := range blocks.GetBlocks() {
+		switch {
+		case v == "":
+			v = b.Version
+		case v != b.Version:
+			return "mixed"
+		}
+	}
+	if v == "" {
+		return "none"
+	}
+	return v
 }
 
 type (
@@ -250,7 +268,7 @@ func (q *Querier) FindTraceByID(ctx context.Context, req *tempopb.TraceByIDReque
 
 		findStart := time.Now()
 		partialTraces, blockErrs, err := q.store.Find(ctx, userID, req, opts)
-		observeBackendProcessing(api.OpTraceByID, userID, findStart)
+		observeBackendProcessing(api.OpTraceByID, userID, traceByIDBlocksVersion(req.Blocks), findStart)
 		if err != nil {
 			return nil, fmt.Errorf("error querying store in Querier.FindTraceByID: %w", err)
 		}
@@ -672,7 +690,7 @@ func (q *Querier) SearchBlock(ctx context.Context, req *tempopb.SearchBlockReque
 	if err != nil {
 		return nil, fmt.Errorf("error extracting org id in Querier.SearchBlock: %w", err)
 	}
-	defer observeBackendProcessing(api.OpSearch, tenantID, time.Now())
+	defer observeBackendProcessing(api.OpSearch, tenantID, req.GetVersion(), time.Now())
 	defer func() { finishQuerierSpan(span, err, resp.GetMetrics()) }()
 
 	blockID, err := backend.ParseUUID(req.BlockID)
@@ -735,7 +753,7 @@ func (q *Querier) internalTagsSearchBlockV2(ctx context.Context, req *tempopb.Se
 		return &tempopb.SearchTagsV2Response{}, nil
 	}
 
-	defer observeBackendProcessing(api.OpSearchTags, tenantID, time.Now())
+	defer observeBackendProcessing(api.OpSearchTags, tenantID, req.GetVersion(), time.Now())
 
 	blockID, err := backend.ParseUUID(req.BlockID)
 	if err != nil {
@@ -812,7 +830,7 @@ func (q *Querier) internalTagsSearchBlockV2(ctx context.Context, req *tempopb.Se
 }
 
 func (q *Querier) internalTagValuesSearchBlock(ctx context.Context, req *tempopb.SearchTagValuesBlockRequest, tenantID string) (resp *tempopb.SearchTagValuesResponse, err error) {
-	defer observeBackendProcessing(api.OpSearchTagValues, tenantID, time.Now())
+	defer observeBackendProcessing(api.OpSearchTagValues, tenantID, req.GetVersion(), time.Now())
 
 	blockID, err := backend.ParseUUID(req.BlockID)
 	if err != nil {
@@ -848,7 +866,7 @@ func (q *Querier) internalTagValuesSearchBlock(ctx context.Context, req *tempopb
 }
 
 func (q *Querier) internalTagValuesSearchBlockV2(ctx context.Context, req *tempopb.SearchTagValuesBlockRequest, tenantID string) (resp *tempopb.SearchTagValuesV2Response, err error) {
-	defer observeBackendProcessing(api.OpSearchTagValues, tenantID, time.Now())
+	defer observeBackendProcessing(api.OpSearchTagValues, tenantID, req.GetVersion(), time.Now())
 
 	blockID, err := backend.ParseUUID(req.BlockID)
 	if err != nil {
