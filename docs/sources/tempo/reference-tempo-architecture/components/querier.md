@@ -59,7 +59,7 @@ Querier memory usage roughly scales with: `job_size * querier_concurrency + buff
 
 | Metric | Description |
 |---|---|
-| `tempo_querier_backend_processing_duration_seconds` | Time the querier spends processing backend blocks (object-store scan and interleaved I/O), labeled by `operation` (`traces`, `search`, `search-tags`, `search-tag-values`, `metrics`) and `tenant`. Excludes recent (live-store) data. Complements `tempodb_backend_request_duration_seconds`, which only times the underlying object-store GET I/O. Use this metric for capacity planning and autoscaling. |
+| `tempo_querier_backend_processing_duration_seconds` | Time the querier spends processing backend blocks (object-store scan and interleaved I/O), labeled by `operation` (`traces`, `search`, `search-tags`, `search-tag-values`, `metrics`), `tenant` and block `version` (`mixed` or `none` for trace-by-ID jobs whose blocks differ in version or that have no blocks). Excludes recent (live-store) data. Complements `tempodb_backend_request_duration_seconds`, which only times the underlying object-store GET I/O. Use this metric for capacity planning and autoscaling. |
 
 ## Related resources
 

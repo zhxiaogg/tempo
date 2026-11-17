@@ -57,7 +57,7 @@ func (q *Querier) queryRangeRecent(ctx context.Context, req *tempopb.QueryRangeR
 }
 
 func (q *Querier) queryBlock(ctx context.Context, req *tempopb.QueryRangeRequest, tenantID string) (resp *tempopb.QueryRangeResponse, err error) {
-	defer observeBackendProcessing(api.OpMetrics, tenantID, time.Now())
+	defer observeBackendProcessing(api.OpMetrics, tenantID, req.Version, time.Now())
 
 	blockID, err := backend.ParseUUID(req.BlockID)
 	if err != nil {
