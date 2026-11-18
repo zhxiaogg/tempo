@@ -25,11 +25,12 @@ const (
 	HintNewFetch               = "spanonly_fetch"           // metrics: new fetch layer (only in vParquet5)
 	HintExtrapolate            = "extrapolate"              // metrics: scale counts by per-span sampling probability from tracestate
 	HintBlockFormat            = "block_format"             // frontend: read only backend blocks of this block version
+	HintQuerierEngine          = "querier_engine"           // querier: "rust" runs vCG1 block jobs on the configured tempo-rs sidecar
 )
 
 func isUnsafe(h string) bool {
 	switch h {
-	case HintSample, HintTraceSample, HintSpanSample, HintExemplars, HintMostRecent, HintExtrapolate, HintBlockFormat:
+	case HintSample, HintTraceSample, HintSpanSample, HintExemplars, HintMostRecent, HintExtrapolate, HintBlockFormat, HintQuerierEngine:
 		return false
 	default:
 		return true

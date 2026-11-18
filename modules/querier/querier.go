@@ -48,19 +48,19 @@ var metricMetricsLiveStoreClients = promauto.NewGauge(prometheus.GaugeOpts{
 })
 
 // metricBackendProcessingDuration times how long the querier spends processing
-// backend blocks (vs recent live-store data), by operation, tenant and block version.
+// backend blocks (vs recent live-store data), by operation, tenant, block version and engine.
 var metricBackendProcessingDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 	Namespace:                       "tempo",
 	Name:                            "querier_backend_processing_duration_seconds",
-	Help:                            "Time the querier spends processing backend blocks (object-store scan + interleaved I/O), by operation, tenant and block version. Excludes recent (live-store) data.",
+	Help:                            "Time the querier spends processing backend blocks (object-store scan + interleaved I/O), by operation, tenant, block version and engine. Excludes recent (live-store) data.",
 	Buckets:                         prometheus.ExponentialBuckets(0.005, 4, 6),
 	NativeHistogramBucketFactor:     1.1,
 	NativeHistogramMaxBucketNumber:  100,
 	NativeHistogramMinResetDuration: time.Hour,
-}, []string{"operation", "tenant", "version"})
+}, []string{"operation", "tenant", "version", "engine"})
 
-func observeBackendProcessing(operation, tenant, version string, start time.Time) {
-	metricBackendProcessingDuration.WithLabelValues(operation, tenant, version).Observe(time.Since(start).Seconds())
+func observeBackendProcessing(operation, tenant, version, engine string, start time.Time) {
+	metricBackendProcessingDuration.WithLabelValues(operation, tenant, version, engine).Observe(time.Since(start).Seconds())
 }
 
 // traceByIDBlocksVersion is the block version of a trace-by-ID job: its blocks' version,
@@ -100,6 +100,7 @@ type Querier struct {
 	limits overrides.Interface
 
 	externalClient *external.Client
+	rust           *rustEngine
 
 	subservices        *services.Manager
 	subservicesWatcher *services.FailureWatcher
@@ -145,6 +146,12 @@ func New(
 		}
 		q.externalClient = externalClient
 	}
+
+	rust, err := newRustEngine(cfg.RustEngine, cfg.Worker.GRPCClientConfig.MaxRecvMsgSize)
+	if err != nil {
+		return nil, err
+	}
+	q.rust = rust
 
 	q.Service = services.NewBasicService(q.starting, q.running, q.stopping)
 	return q, nil
@@ -268,7 +275,7 @@ func (q *Querier) FindTraceByID(ctx context.Context, req *tempopb.TraceByIDReque
 
 		findStart := time.Now()
 		partialTraces, blockErrs, err := q.store.Find(ctx, userID, req, opts)
-		observeBackendProcessing(api.OpTraceByID, userID, traceByIDBlocksVersion(req.Blocks), findStart)
+		observeBackendProcessing(api.OpTraceByID, userID, traceByIDBlocksVersion(req.Blocks), engineGo, findStart)
 		if err != nil {
 			return nil, fmt.Errorf("error querying store in Querier.FindTraceByID: %w", err)
 		}
@@ -690,8 +697,23 @@ func (q *Querier) SearchBlock(ctx context.Context, req *tempopb.SearchBlockReque
 	if err != nil {
 		return nil, fmt.Errorf("error extracting org id in Querier.SearchBlock: %w", err)
 	}
-	defer observeBackendProcessing(api.OpSearch, tenantID, req.GetVersion(), time.Now())
+	engine := engineGo
+	defer func(start time.Time) {
+		observeBackendProcessing(api.OpSearch, tenantID, req.GetVersion(), engine, start)
+	}(time.Now())
 	defer func() { finishQuerierSpan(span, err, resp.GetMetrics()) }()
+
+	if q.rust.wants(req.SearchReq.GetQuery(), req.GetVersion()) {
+		rresp, rerr := q.rust.searchBlock(ctx, req)
+		if rerr == nil {
+			engine = engineRust
+			return rresp, nil
+		}
+		if !q.rust.fallback(ctx, api.OpSearch, rerr) {
+			engine = engineRust
+			return nil, rerr
+		}
+	}
 
 	blockID, err := backend.ParseUUID(req.BlockID)
 	if err != nil {
@@ -753,7 +775,7 @@ func (q *Querier) internalTagsSearchBlockV2(ctx context.Context, req *tempopb.Se
 		return &tempopb.SearchTagsV2Response{}, nil
 	}
 
-	defer observeBackendProcessing(api.OpSearchTags, tenantID, req.GetVersion(), time.Now())
+	defer observeBackendProcessing(api.OpSearchTags, tenantID, req.GetVersion(), engineGo, time.Now())
 
 	blockID, err := backend.ParseUUID(req.BlockID)
 	if err != nil {
@@ -830,7 +852,7 @@ func (q *Querier) internalTagsSearchBlockV2(ctx context.Context, req *tempopb.Se
 }
 
 func (q *Querier) internalTagValuesSearchBlock(ctx context.Context, req *tempopb.SearchTagValuesBlockRequest, tenantID string) (resp *tempopb.SearchTagValuesResponse, err error) {
-	defer observeBackendProcessing(api.OpSearchTagValues, tenantID, req.GetVersion(), time.Now())
+	defer observeBackendProcessing(api.OpSearchTagValues, tenantID, req.GetVersion(), engineGo, time.Now())
 
 	blockID, err := backend.ParseUUID(req.BlockID)
 	if err != nil {
@@ -866,7 +888,7 @@ func (q *Querier) internalTagValuesSearchBlock(ctx context.Context, req *tempopb
 }
 
 func (q *Querier) internalTagValuesSearchBlockV2(ctx context.Context, req *tempopb.SearchTagValuesBlockRequest, tenantID string) (resp *tempopb.SearchTagValuesV2Response, err error) {
-	defer observeBackendProcessing(api.OpSearchTagValues, tenantID, req.GetVersion(), time.Now())
+	defer observeBackendProcessing(api.OpSearchTagValues, tenantID, req.GetVersion(), engineGo, time.Now())
 
 	blockID, err := backend.ParseUUID(req.BlockID)
 	if err != nil {

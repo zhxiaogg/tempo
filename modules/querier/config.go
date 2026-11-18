@@ -15,6 +15,7 @@ type Config struct {
 	Search        SearchConfig        `yaml:"search"`
 	TraceByID     TraceByIDConfig     `yaml:"trace_by_id"`
 	Metrics       MetricsConfig       `yaml:"metrics"`
+	RustEngine    RustEngineConfig    `yaml:"rust_engine"`
 	PartitionRing PartitionRingConfig `yaml:"partition_ring"`
 
 	ExtraQueryDelay                        time.Duration `yaml:"extra_query_delay,omitempty"`

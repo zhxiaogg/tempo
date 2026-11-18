@@ -57,7 +57,20 @@ func (q *Querier) queryRangeRecent(ctx context.Context, req *tempopb.QueryRangeR
 }
 
 func (q *Querier) queryBlock(ctx context.Context, req *tempopb.QueryRangeRequest, tenantID string) (resp *tempopb.QueryRangeResponse, err error) {
-	defer observeBackendProcessing(api.OpMetrics, tenantID, req.Version, time.Now())
+	engine := engineGo
+	defer func(start time.Time) { observeBackendProcessing(api.OpMetrics, tenantID, req.Version, engine, start) }(time.Now())
+
+	if q.rust.wants(req.Query, req.Version) {
+		rresp, rerr := q.rust.queryRange(ctx, req)
+		if rerr == nil {
+			engine = engineRust
+			return rresp, nil
+		}
+		if !q.rust.fallback(ctx, api.OpMetrics, rerr) {
+			engine = engineRust
+			return nil, rerr
+		}
+	}
 
 	blockID, err := backend.ParseUUID(req.BlockID)
 	if err != nil {
